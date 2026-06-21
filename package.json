@@ -1,6 +1,6 @@
 {
   "name": "@nbtca/docs",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Data-only library for the NBTCA documents repository",
   "type": "module",
   "main": "./dist/index.js",
@@ -24,6 +24,10 @@
     "documents",
     "github"
   ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/nbtca/docs"
+  },
   "license": "MIT",
   "devDependencies": {
     "@types/node": "^26.0.0",
