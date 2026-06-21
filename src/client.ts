@@ -114,5 +114,10 @@ export function createDocsClient(options: DocsClientOptions = {}): DocsClient {
     return content;
   }
 
-  return { listDir, getFile };
+  function clear(): void {
+    dirCache.clear();
+    fileCache.clear();
+  }
+
+  return { listDir, getFile, clear };
 }

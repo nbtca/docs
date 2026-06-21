@@ -18,6 +18,7 @@ export interface DocsClientOptions {
 export interface DocsClient {
   listDir(path?: string): Promise<DocItem[]>;
   getFile(path: string): Promise<string>;
+  clear(): void;
 }
 
 export class DocsFetchError extends Error {
