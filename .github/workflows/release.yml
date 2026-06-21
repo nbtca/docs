@@ -30,7 +30,10 @@ jobs:
             echo "Version mismatch: tag v$TAG_VERSION, package.json v$PKG_VERSION" >&2
             exit 1
           fi
-      - run: npm publish --access public
+      - name: Publish to npm
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
