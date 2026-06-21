@@ -26,7 +26,25 @@ function filterAndSort(raw: GitHubItem[]): DocItem[] {
     });
 }
 
+function filterTree(items: GitHubTreeItem[]): DocItem[] {
+  return items
+    .filter(i => {
+      const parts = i.path.split('/');
+      if (parts.some(p => p.startsWith('.') || SKIP.has(p))) return false;
+      // Only return .md files; directories are navigated via listDir
+      return i.type === 'blob' && i.path.endsWith('.md');
+    })
+    .map(i => ({
+      name: i.path.split('/').pop()!,
+      path: i.path,
+      type: 'file' as const,
+    }))
+    .sort((a, b) => a.path.localeCompare(b.path));
+}
+
 interface GitHubItem { name: string; path: string; type: string }
+interface GitHubTreeItem { path: string; type: 'blob' | 'tree' }
+interface GitHubTreeResponse { tree: GitHubTreeItem[]; truncated: boolean }
 
 export function createDocsClient(options: DocsClientOptions = {}): DocsClient {
   const owner = options.owner ?? DEFAULTS.owner;
@@ -36,10 +54,9 @@ export function createDocsClient(options: DocsClientOptions = {}): DocsClient {
     ? (process.env['GITHUB_TOKEN'] ?? process.env['GH_TOKEN'])
     : undefined);
 
-  const dirCache = new TtlCache<DocItem[]>(
-    options.cacheTtlMs?.dir ?? DEFAULTS.dirTtlMs, 30);
-  const fileCache = new TtlCache<string>(
-    options.cacheTtlMs?.file ?? DEFAULTS.fileTtlMs, 50);
+  const dirCache  = new TtlCache<DocItem[]>(options.cacheTtlMs?.dir  ?? DEFAULTS.dirTtlMs,  30);
+  const fileCache = new TtlCache<string>   (options.cacheTtlMs?.file ?? DEFAULTS.fileTtlMs, 50);
+  const treeCache = new TtlCache<DocItem[]>(options.cacheTtlMs?.dir  ?? DEFAULTS.dirTtlMs,   1);
 
   function headers(): Record<string, string> {
     const h: Record<string, string> = { 'Accept': 'application/vnd.github.v3+json' };
@@ -87,6 +104,35 @@ export function createDocsClient(options: DocsClientOptions = {}): DocsClient {
     return items;
   }
 
+  async function listAll(): Promise<DocItem[]> {
+    const key = '__tree__';
+    const hit = treeCache.get(key);
+    if (hit) return hit;
+
+    const url = `https://api.github.com/repos/${owner}/${repo}/git/trees/${branch}?recursive=1`;
+    let res: Response;
+    try {
+      res = await ghFetch(url, 20_000);
+    } catch (err) {
+      const stale = treeCache.getStale(key);
+      if (stale) return stale;
+      const msg = err instanceof Error && err.name === 'AbortError'
+        ? 'Request timed out' : String(err);
+      throw new DocsFetchError('', null, msg);
+    }
+
+    if (!res.ok) {
+      const stale = treeCache.getStale(key);
+      if (stale) return stale;
+      throw new DocsFetchError('', res.status, `HTTP ${res.status}`);
+    }
+
+    const data = (await res.json()) as GitHubTreeResponse;
+    const items = filterTree(data.tree);
+    treeCache.set(key, items);
+    return items;
+  }
+
   async function getFile(path: string): Promise<string> {
     const hit = fileCache.get(path);
     if (hit) return hit;
@@ -117,7 +163,8 @@ export function createDocsClient(options: DocsClientOptions = {}): DocsClient {
   function clear(): void {
     dirCache.clear();
     fileCache.clear();
+    treeCache.clear();
   }
 
-  return { listDir, getFile, clear };
+  return { listDir, listAll, getFile, clear };
 }

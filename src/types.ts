@@ -17,6 +17,7 @@ export interface DocsClientOptions {
 
 export interface DocsClient {
   listDir(path?: string): Promise<DocItem[]>;
+  listAll(): Promise<DocItem[]>;
   getFile(path: string): Promise<string>;
   clear(): void;
 }
