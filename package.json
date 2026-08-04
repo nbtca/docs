@@ -1,6 +1,6 @@
 {
   "name": "@nbtca/docs",
-  "version": "0.2.0",
+  "version": "0.2.2",
   "description": "Data-only library for the NBTCA documents repository",
   "type": "module",
   "main": "./dist/index.js",
@@ -15,6 +15,8 @@
     "dist"
   ],
   "scripts": {
+    "clean": "node --input-type=module --eval \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true })\"",
+    "prebuild": "npm run clean",
     "build": "tsc",
     "test": "vitest run",
     "prepublishOnly": "npm run build && npm test"
@@ -26,12 +28,12 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/nbtca/docs"
+    "url": "git+https://github.com/nbtca/docs.git"
   },
   "license": "MIT",
   "devDependencies": {
     "@types/node": "^26.0.0",
     "typescript": "^5.4.0",
-    "vitest": "^2.0.0"
+    "vitest": "^3.2.7"
   }
 }
