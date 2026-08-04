@@ -20,8 +20,6 @@ jobs:
           cache: 'npm'
       - run: npm install -g npm@11.5.1
       - run: npm ci
-      - run: npm test
-      - run: npm run build
       - name: Check tag matches package version
         run: |
           TAG_VERSION=${GITHUB_REF#refs/tags/v}
@@ -30,7 +28,7 @@ jobs:
             echo "Version mismatch: tag v$TAG_VERSION, package.json v$PKG_VERSION" >&2
             exit 1
           fi
-      - run: npm publish --access public
+      - run: npm publish
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}

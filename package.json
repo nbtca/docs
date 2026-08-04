@@ -1,16 +1,17 @@
 {
   "name": "@nbtca/docs",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Data-only library for the NBTCA documents repository",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "import": "./dist/index.js",
-      "types": "./dist/index.d.ts"
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
     }
   },
+  "sideEffects": false,
   "files": [
     "dist"
   ],
@@ -19,7 +20,10 @@
     "prebuild": "npm run clean",
     "build": "tsc",
     "test": "vitest run",
-    "prepublishOnly": "npm run build && npm test"
+    "precheck:package": "npm run build",
+    "check:package": "node scripts/check-package.mjs",
+    "check": "npm test && npm run check:package && npm audit --audit-level=moderate",
+    "prepublishOnly": "npm run check"
   },
   "keywords": [
     "nbtca",
@@ -30,7 +34,17 @@
     "type": "git",
     "url": "git+https://github.com/nbtca/docs.git"
   },
+  "bugs": {
+    "url": "https://github.com/nbtca/docs/issues"
+  },
+  "homepage": "https://github.com/nbtca/docs#readme",
   "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=20.12.0"
+  },
   "devDependencies": {
     "@types/node": "^26.0.0",
     "typescript": "^5.4.0",

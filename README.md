@@ -2,7 +2,7 @@
 
 Data-only library for the [NBTCA documents repository](https://github.com/nbtca/documents).
 Fetches directory listings and raw markdown files from GitHub with built-in TTL caching,
-stale-while-revalidate fallback, and rate-limit handling.
+stale-on-error fallback, and rate-limit handling.
 
 Rendering is the consumer's job (e.g. `@nbtca/prompt`).
 
@@ -20,6 +20,7 @@ import { createDocsClient } from '@nbtca/docs';
 const docs = createDocsClient(); // defaults to nbtca/documents@main
 
 const items = await docs.listDir('tutorial');  // DocItem[]
+const all    = await docs.listAll();            // all markdown DocItem[]
 const md    = await docs.getFile('repair/guide.md');  // string (raw markdown)
 ```
 
@@ -55,6 +56,10 @@ Filters out hidden files, non-markdown files, and repository metadata.
 ### `docs.getFile(path)`
 
 Returns raw markdown as a string. Falls back to stale cache on network error.
+
+### `docs.listAll()`
+
+Returns every markdown file in the repository through GitHub's recursive tree API.
 
 ### `DocsFetchError`
 

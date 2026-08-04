@@ -205,7 +205,7 @@ describe('createDocsClient', () => {
     expect(spy).toHaveBeenCalledTimes(1);
   });
 
-  describe('stale-while-revalidate fallback (README\'s headline resilience claim, previously untested)', () => {
+  describe('stale-on-error fallback', () => {
     beforeEach(() => vi.useFakeTimers());
     afterEach(() => vi.useRealTimers());
 
