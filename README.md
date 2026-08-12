@@ -1,10 +1,8 @@
 # @nbtca/docs
 
-Data-only library for the [NBTCA documents repository](https://github.com/nbtca/documents).
-Fetches directory listings and raw markdown files from GitHub with built-in TTL caching,
-stale-on-error fallback, and rate-limit handling.
-
-Rendering is the consumer's job (e.g. `@nbtca/prompt`).
+Typed GitHub client for the [NBTCA documents repository](https://github.com/nbtca/documents).
+It lists Markdown documents, reads raw content, caches successful responses, and falls back to
+stale data after transient failures. Rendering remains the consumer's responsibility.
 
 ## Install
 
@@ -17,53 +15,63 @@ npm install @nbtca/docs
 ```ts
 import { createDocsClient } from '@nbtca/docs';
 
-const docs = createDocsClient(); // defaults to nbtca/documents@main
+const docs = createDocsClient();
 
-const items = await docs.listDir('tutorial');  // DocItem[]
-const all    = await docs.listAll();            // all markdown DocItem[]
-const md    = await docs.getFile('repair/guide.md');  // string (raw markdown)
-```
-
-Custom target:
-
-```ts
-const docs = createDocsClient({
-  owner: 'my-org',
-  repo: 'my-docs',
-  branch: 'main',
-  token: process.env.GITHUB_TOKEN,
-});
+const sections = await docs.listDir();
+const documents = await docs.listAll();
+const markdown = await docs.getFile('repair/guide.md');
+const page = await docs.getDocument('repair/index.md');
+const matches = await docs.search('repair', { pathPrefix: 'repair' });
 ```
 
 ## API
 
 ### `createDocsClient(options?)`
 
-| Option | Default | Description |
-|---|---|---|
-| `owner` | `'nbtca'` | GitHub org/user |
-| `repo` | `'documents'` | Repository name |
-| `branch` | `'main'` | Branch or ref |
-| `token` | `GITHUB_TOKEN` env | Auth token (raises rate limit) |
-| `cacheTtlMs.dir` | `300000` (5 min) | Directory listing cache TTL |
-| `cacheTtlMs.file` | `600000` (10 min) | File content cache TTL |
+| Option            | Default                      | Description                  |
+| ----------------- | ---------------------------- | ---------------------------- |
+| `owner`           | `'nbtca'`                    | GitHub owner                 |
+| `repo`            | `'documents'`                | Repository name              |
+| `branch`          | `'main'`                     | Branch name or ref           |
+| `token`           | `GITHUB_TOKEN` or `GH_TOKEN` | GitHub token                 |
+| `cacheTtlMs.dir`  | `300000`                     | Directory and tree cache TTL |
+| `cacheTtlMs.file` | `600000`                     | File cache TTL               |
 
 ### `docs.listDir(path?)`
 
-Returns `DocItem[]` for the given path (root if omitted).
-Filters out hidden files, non-markdown files, and repository metadata.
+Lists directories and Markdown files at a repository-relative path. The root path is used when
+`path` is omitted.
 
 ### `docs.getFile(path)`
 
-Returns raw markdown as a string. Falls back to stale cache on network error.
+Returns raw file content.
 
 ### `docs.listAll()`
 
-Returns every markdown file in the repository through GitHub's recursive tree API.
+Lists every Markdown file through GitHub's recursive tree API.
+
+### `docs.listSections()`
+
+Returns top-level content sections with document counts and optional index paths.
+
+### `docs.getDocument(path)`
+
+Returns content with its route, section, title, summary, and semantic component attributes. Component
+metadata covers `PageHero`, `FactStrip`, `LinkCard`, `Split`, `TimelineEntry`, and `Figure` without
+imposing a renderer.
+
+### `docs.search(query, options?)`
+
+Searches paths, titles, summaries, Markdown text, and semantic component attributes. Results are
+ranked and include excerpts. Use `pathPrefix` to scope a search and `limit` to cap results.
+
+### `docs.clear()`
+
+Clears all cached values and in-flight request bookkeeping.
 
 ### `DocsFetchError`
 
-Thrown when a fetch fails with no stale cache available. Has `.path` and `.status` fields.
+Thrown when a request fails without usable stale data. Exposes `path` and HTTP `status`.
 
 ## License
 

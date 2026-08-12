@@ -13,33 +13,48 @@ const mockDir = [
 const mockTree = {
   truncated: false,
   tree: [
-    { path: 'repair/guide.md',     type: 'blob' },
-    { path: 'repair/advanced.md',  type: 'blob' },
-    { path: 'repair',              type: 'tree' },
-    { path: 'repair/image.png',    type: 'blob' },
+    { path: 'repair/guide.md', type: 'blob' },
+    { path: 'repair/advanced.md', type: 'blob' },
+    { path: 'repair', type: 'tree' },
+    { path: 'repair/image.png', type: 'blob' },
     { path: 'node_modules/pkg.md', type: 'blob' },
-    { path: '.github/CODEOWNERS',  type: 'blob' },
-    { path: 'CONTRIBUTING.md',     type: 'blob' },
-    { path: '.hidden/secret.md',   type: 'blob' },
-    { path: 'intro.md',            type: 'blob' },
+    { path: '.github/CODEOWNERS', type: 'blob' },
+    { path: 'CONTRIBUTING.md', type: 'blob' },
+    { path: 'README.md', type: 'blob' },
+    { path: 'docs/editorial-standard.md', type: 'blob' },
+    { path: '.hidden/secret.md', type: 'blob' },
+    { path: 'intro.md', type: 'blob' },
   ],
 };
 
-function mockFetch(response: { ok: boolean; status?: number; json?: () => Promise<unknown>; text?: () => Promise<string> }) {
+function mockFetch(response: {
+  ok: boolean;
+  status?: number;
+  json?: () => Promise<unknown>;
+  text?: () => Promise<string>;
+}) {
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response));
 }
 
-function mockFetchThenFail(first: { ok: boolean; status?: number; json?: () => Promise<unknown>; text?: () => Promise<string> }, error: Error) {
-  const fn = vi.fn()
-    .mockResolvedValueOnce(first)
-    .mockRejectedValue(error);
+function mockFetchThenFail(
+  first: {
+    ok: boolean;
+    status?: number;
+    json?: () => Promise<unknown>;
+    text?: () => Promise<string>;
+  },
+  error: Error,
+) {
+  const fn = vi.fn().mockResolvedValueOnce(first).mockRejectedValue(error);
   vi.stubGlobal('fetch', fn);
   return fn;
 }
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>(done => { resolve = done; });
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
   return { promise, resolve };
 }
 
@@ -53,26 +68,23 @@ describe('createDocsClient', () => {
     { repo: '.' },
     { branch: '' },
     { branch: '..' },
-  ])('rejects invalid repository coordinates: %o', options => {
+  ])('rejects invalid repository coordinates: %o', (options) => {
     expect(() => createDocsClient(options)).toThrow(TypeError);
   });
 
-  it.each([-1, Number.NaN, Number.POSITIVE_INFINITY])(
-    'rejects an invalid cache TTL: %s',
-    ttl => {
-      expect(() => createDocsClient({ cacheTtlMs: { dir: ttl } })).toThrow(RangeError);
-      expect(() => createDocsClient({ cacheTtlMs: { file: ttl } })).toThrow(RangeError);
-    },
-  );
+  it.each([-1, Number.NaN, Number.POSITIVE_INFINITY])('rejects an invalid cache TTL: %s', (ttl) => {
+    expect(() => createDocsClient({ cacheTtlMs: { dir: ttl } })).toThrow(RangeError);
+    expect(() => createDocsClient({ cacheTtlMs: { file: ttl } })).toThrow(RangeError);
+  });
 
   it('filters skipped names and non-md files', async () => {
     mockFetch({ ok: true, json: async () => mockDir });
     const client = createDocsClient();
     const items = await client.listDir('repair');
-    expect(items.map(i => i.name)).not.toContain('node_modules');
-    expect(items.map(i => i.name)).not.toContain('.github');
-    expect(items.map(i => i.name)).not.toContain('image.png');
-    expect(items.find(i => i.name === 'guide.md')).toBeDefined();
+    expect(items.map((i) => i.name)).not.toContain('node_modules');
+    expect(items.map((i) => i.name)).not.toContain('.github');
+    expect(items.map((i) => i.name)).not.toContain('image.png');
+    expect(items.find((i) => i.name === 'guide.md')).toBeDefined();
   });
 
   it('does not expose symlinks or submodules as document files', async () => {
@@ -90,7 +102,7 @@ describe('createDocsClient', () => {
     mockFetch({ ok: true, json: async () => mockDir });
     const client = createDocsClient();
     const items = await client.listDir();
-    const types = items.map(i => i.type);
+    const types = items.map((i) => i.type);
     const firstFile = types.indexOf('file');
     const lastDir = types.lastIndexOf('dir');
     expect(lastDir).toBeLessThan(firstFile === -1 ? Infinity : firstFile);
@@ -115,7 +127,8 @@ describe('createDocsClient', () => {
   });
 
   it('keeps the root cache separate from a directory named __root__', async () => {
-    const fetchMock = vi.fn()
+    const fetchMock = vi
+      .fn()
       .mockResolvedValueOnce({
         ok: true,
         json: async () => [{ name: 'root.md', path: 'root.md', type: 'file' }],
@@ -225,7 +238,8 @@ describe('createDocsClient', () => {
     });
 
     it('listDir returns stale data when a refetch responds with an HTTP error (not just a thrown network error)', async () => {
-      const fn = vi.fn()
+      const fn = vi
+        .fn()
         .mockResolvedValueOnce({ ok: true, json: async () => mockDir })
         .mockResolvedValue({ ok: false, status: 503 });
       vi.stubGlobal('fetch', fn);
@@ -237,7 +251,8 @@ describe('createDocsClient', () => {
     });
 
     it('does not hide a permanent HTTP error behind stale data', async () => {
-      const fn = vi.fn()
+      const fn = vi
+        .fn()
         .mockResolvedValueOnce({ ok: true, json: async () => mockDir })
         .mockResolvedValue({ ok: false, status: 404 });
       vi.stubGlobal('fetch', fn);
@@ -274,9 +289,15 @@ describe('createDocsClient', () => {
     });
 
     it('listDir returns stale data when reading a successful response fails', async () => {
-      const fn = vi.fn()
+      const fn = vi
+        .fn()
         .mockResolvedValueOnce({ ok: true, json: async () => mockDir })
-        .mockResolvedValue({ ok: true, json: async () => { throw new Error('invalid JSON'); } });
+        .mockResolvedValue({
+          ok: true,
+          json: async () => {
+            throw new Error('invalid JSON');
+          },
+        });
       vi.stubGlobal('fetch', fn);
       const client = createDocsClient({ cacheTtlMs: { dir: 1000 } });
       const fresh = await client.listDir('repair');
@@ -285,9 +306,15 @@ describe('createDocsClient', () => {
     });
 
     it('listAll returns stale data when reading a successful response fails', async () => {
-      const fn = vi.fn()
+      const fn = vi
+        .fn()
         .mockResolvedValueOnce({ ok: true, json: async () => mockTree })
-        .mockResolvedValue({ ok: true, json: async () => { throw new Error('invalid JSON'); } });
+        .mockResolvedValue({
+          ok: true,
+          json: async () => {
+            throw new Error('invalid JSON');
+          },
+        });
       vi.stubGlobal('fetch', fn);
       const client = createDocsClient({ cacheTtlMs: { dir: 1000 } });
       const fresh = await client.listAll();
@@ -296,7 +323,8 @@ describe('createDocsClient', () => {
     });
 
     it('listDir returns stale data when a successful response has the wrong shape', async () => {
-      const fn = vi.fn()
+      const fn = vi
+        .fn()
         .mockResolvedValueOnce({ ok: true, json: async () => mockDir })
         .mockResolvedValue({ ok: true, json: async () => ({ message: 'unexpected' }) });
       vi.stubGlobal('fetch', fn);
@@ -307,7 +335,8 @@ describe('createDocsClient', () => {
     });
 
     it('listAll returns stale data when a successful response has the wrong shape', async () => {
-      const fn = vi.fn()
+      const fn = vi
+        .fn()
         .mockResolvedValueOnce({ ok: true, json: async () => mockTree })
         .mockResolvedValue({ ok: true, json: async () => ({ truncated: false, tree: null }) });
       vi.stubGlobal('fetch', fn);
@@ -318,9 +347,15 @@ describe('createDocsClient', () => {
     });
 
     it('getFile returns stale data when reading a successful response fails', async () => {
-      const fn = vi.fn()
+      const fn = vi
+        .fn()
         .mockResolvedValueOnce({ ok: true, text: async () => '# Hello' })
-        .mockResolvedValue({ ok: true, text: async () => { throw new Error('stream closed'); } });
+        .mockResolvedValue({
+          ok: true,
+          text: async () => {
+            throw new Error('stream closed');
+          },
+        });
       vi.stubGlobal('fetch', fn);
       const client = createDocsClient({ cacheTtlMs: { file: 1000 } });
       const fresh = await client.getFile('repair/guide.md');
@@ -329,7 +364,12 @@ describe('createDocsClient', () => {
     });
 
     it('wraps response body failures when no stale data exists', async () => {
-      mockFetch({ ok: true, json: async () => { throw new Error('invalid JSON'); } });
+      mockFetch({
+        ok: true,
+        json: async () => {
+          throw new Error('invalid JSON');
+        },
+      });
       const client = createDocsClient();
       await expect(client.listDir('broken')).rejects.toMatchObject({
         name: 'DocsFetchError',
@@ -348,14 +388,21 @@ describe('createDocsClient', () => {
   describe('clear', () => {
     it('does not cache a directory response started before clear', async () => {
       const pending = deferred<{ ok: boolean; json: () => Promise<unknown> }>();
-      const fetchMock = vi.fn()
+      const fetchMock = vi
+        .fn()
         .mockImplementationOnce(() => pending.promise)
-        .mockResolvedValue({ ok: true, json: async () => [{ name: 'new.md', path: 'new.md', type: 'file' }] });
+        .mockResolvedValue({
+          ok: true,
+          json: async () => [{ name: 'new.md', path: 'new.md', type: 'file' }],
+        });
       vi.stubGlobal('fetch', fetchMock);
       const client = createDocsClient();
       const first = client.listDir();
       client.clear();
-      pending.resolve({ ok: true, json: async () => [{ name: 'old.md', path: 'old.md', type: 'file' }] });
+      pending.resolve({
+        ok: true,
+        json: async () => [{ name: 'old.md', path: 'old.md', type: 'file' }],
+      });
       await expect(first).resolves.toMatchObject([{ name: 'old.md' }]);
       await expect(client.listDir()).resolves.toMatchObject([{ name: 'new.md' }]);
       expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -363,7 +410,8 @@ describe('createDocsClient', () => {
 
     it('does not cache a tree response started before clear', async () => {
       const pending = deferred<{ ok: boolean; json: () => Promise<unknown> }>();
-      const fetchMock = vi.fn()
+      const fetchMock = vi
+        .fn()
         .mockImplementationOnce(() => pending.promise)
         .mockResolvedValue({
           ok: true,
@@ -384,7 +432,8 @@ describe('createDocsClient', () => {
 
     it('does not cache file content started before clear', async () => {
       const pending = deferred<{ ok: boolean; text: () => Promise<string> }>();
-      const fetchMock = vi.fn()
+      const fetchMock = vi
+        .fn()
         .mockImplementationOnce(() => pending.promise)
         .mockResolvedValue({ ok: true, text: async () => 'new' });
       vi.stubGlobal('fetch', fetchMock);
@@ -411,6 +460,9 @@ describe('createDocsClient', () => {
       pending.resolve({ ok: true, json: async () => mockDir });
       const [a, b] = await Promise.all([first, second]);
       expect(b).toEqual(a);
+      expect(b).not.toBe(a);
+      a.splice(0, a.length);
+      expect(b.length).toBeGreaterThan(0);
     });
 
     it('shares the in-flight tree request', async () => {
@@ -424,6 +476,9 @@ describe('createDocsClient', () => {
       pending.resolve({ ok: true, json: async () => mockTree });
       const [a, b] = await Promise.all([first, second]);
       expect(b).toEqual(a);
+      expect(b).not.toBe(a);
+      a.splice(0, a.length);
+      expect(b.length).toBeGreaterThan(0);
     });
 
     it('shares an in-flight file request for the same path', async () => {
@@ -440,7 +495,8 @@ describe('createDocsClient', () => {
     });
 
     it('retries after a shared request fails', async () => {
-      const fetchMock = vi.fn()
+      const fetchMock = vi
+        .fn()
         .mockRejectedValueOnce(new Error('network down'))
         .mockResolvedValue({ ok: true, text: async () => '# Guide' });
       vi.stubGlobal('fetch', fetchMock);
@@ -449,7 +505,7 @@ describe('createDocsClient', () => {
         client.getFile('guide.md'),
         client.getFile('guide.md'),
       ]);
-      expect(failed.every(result => result.status === 'rejected')).toBe(true);
+      expect(failed.every((result) => result.status === 'rejected')).toBe(true);
       expect(fetchMock).toHaveBeenCalledTimes(1);
       await expect(client.getFile('guide.md')).resolves.toBe('# Guide');
       expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -463,29 +519,36 @@ describe('createDocsClient', () => {
     it('keeps the timeout active while reading a response body', async () => {
       let signal!: AbortSignal;
       const fetchMock = vi.fn().mockImplementation((_url: string, init: RequestInit) => {
-        signal = init.signal as AbortSignal;
+        if (!init.signal) throw new TypeError('Expected an abort signal');
+        signal = init.signal;
         return Promise.resolve({
           ok: true,
-          json: () => new Promise((_resolve, reject) => {
-            signal.addEventListener('abort', () => {
-              const error = new Error('aborted');
-              error.name = 'AbortError';
-              reject(error);
-            }, { once: true });
-          }),
+          json: () =>
+            new Promise((_resolve, reject) => {
+              signal.addEventListener(
+                'abort',
+                () => {
+                  const error = new Error('aborted');
+                  error.name = 'AbortError';
+                  reject(error);
+                },
+                { once: true },
+              );
+            }),
         });
       });
       vi.stubGlobal('fetch', fetchMock);
       const client = createDocsClient();
       const request = client.listDir();
-      await vi.advanceTimersByTimeAsync(10_000);
-      expect(signal.aborted).toBe(true);
-      await expect(request).rejects.toMatchObject({
+      const rejection = expect(request).rejects.toMatchObject({
         name: 'DocsFetchError',
         path: '',
         status: null,
         message: 'Request timed out',
       });
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(signal.aborted).toBe(true);
+      await rejection;
     });
   });
 });
@@ -495,7 +558,7 @@ describe('listAll', () => {
     mockFetch({ ok: true, json: async () => mockTree });
     const client = createDocsClient();
     const items = await client.listAll();
-    const paths = items.map(i => i.path);
+    const paths = items.map((i) => i.path);
     expect(paths).toEqual(['intro.md', 'repair/advanced.md', 'repair/guide.md']);
   });
 
@@ -503,10 +566,12 @@ describe('listAll', () => {
     mockFetch({ ok: true, json: async () => mockTree });
     const client = createDocsClient();
     const items = await client.listAll();
-    const paths = items.map(i => i.path);
+    const paths = items.map((i) => i.path);
     expect(paths).not.toContain('node_modules/pkg.md');
     expect(paths).not.toContain('.hidden/secret.md');
     expect(paths).not.toContain('CONTRIBUTING.md');
+    expect(paths).not.toContain('README.md');
+    expect(paths).not.toContain('docs/editorial-standard.md');
     expect(paths).not.toContain('repair/image.png');
   });
 
@@ -514,7 +579,7 @@ describe('listAll', () => {
     mockFetch({ ok: true, json: async () => mockTree });
     const client = createDocsClient();
     const items = await client.listAll();
-    expect(items.every(i => i.type === 'file')).toBe(true);
+    expect(items.every((i) => i.type === 'file')).toBe(true);
   });
 
   it('caches tree results', async () => {
@@ -530,5 +595,183 @@ describe('listAll', () => {
     mockFetch({ ok: false, status: 500 });
     const client = createDocsClient();
     await expect(client.listAll()).rejects.toBeInstanceOf(DocsFetchError);
+  });
+});
+
+describe('document discovery', () => {
+  it('groups documents by top-level section and identifies section indexes', async () => {
+    mockFetch({
+      ok: true,
+      json: async () => ({
+        truncated: false,
+        tree: [
+          { path: 'about/index.md', type: 'blob' },
+          { path: 'about/join.md', type: 'blob' },
+          { path: 'index.md', type: 'blob' },
+          { path: 'repair/guide.md', type: 'blob' },
+        ],
+      }),
+    });
+
+    await expect(createDocsClient().listSections()).resolves.toEqual([
+      { count: 2, indexPath: 'about/index.md', path: 'about' },
+      { count: 1, path: 'repair' },
+    ]);
+  });
+
+  it('returns parsed document metadata and components', async () => {
+    mockFetch({
+      ok: true,
+      text: async () =>
+        [
+          '---',
+          'title: Repair',
+          'summary: Campus support',
+          '---',
+          '<Figure caption="Workshop" source="Archive" />',
+        ].join('\n'),
+    });
+
+    await expect(createDocsClient().getDocument('repair/index.md')).resolves.toMatchObject({
+      components: [{ name: 'Figure', attributes: { caption: 'Workshop', source: 'Archive' } }],
+      route: '/repair/',
+      summary: 'Campus support',
+      title: 'Repair',
+    });
+  });
+
+  it('rejects non-Markdown document paths', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(createDocsClient().getDocument('repair/photo.jpg')).rejects.toBeInstanceOf(
+      TypeError,
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('search', () => {
+  it('searches titles, body text, and semantic component attributes', async () => {
+    const tree = {
+      truncated: false,
+      tree: [
+        { path: 'about/history.md', type: 'blob' },
+        { path: 'repair/guide.md', type: 'blob' },
+        { path: 'tutorial/setup.md', type: 'blob' },
+      ],
+    };
+    const content = new Map([
+      [
+        'about/history.md',
+        '# History\n\n<TimelineEntry year="2001" title="Community founded" pivot>',
+      ],
+      ['repair/guide.md', '# Community founded\n\nA repair guide.'],
+      ['tutorial/setup.md', '# Setup\n\nThe community founded a service.'],
+    ]);
+    const fetchMock = vi.fn().mockImplementation(async (url: string) => {
+      if (url.includes('/git/trees/')) return { ok: true, json: async () => tree };
+      const path = [...content.keys()].find((candidate) => url.endsWith(candidate));
+      return {
+        ok: path !== undefined,
+        status: path ? 200 : 404,
+        text: async () => content.get(path ?? '') ?? '',
+      };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const results = await createDocsClient().search('community founded');
+
+    expect(results.map((result) => result.path)).toEqual([
+      'repair/guide.md',
+      'about/history.md',
+      'tutorial/setup.md',
+    ]);
+    expect(results[1]).toMatchObject({
+      title: 'History',
+      section: 'about',
+    });
+    expect(results[1]?.excerpt).toContain('Community founded');
+  });
+
+  it('supports path and result limits before loading files', async () => {
+    const tree = {
+      truncated: false,
+      tree: [
+        { path: 'about/index.md', type: 'blob' },
+        { path: 'repair/a.md', type: 'blob' },
+        { path: 'repair/b.md', type: 'blob' },
+      ],
+    };
+    const fetchMock = vi.fn().mockImplementation(async (url: string) => {
+      if (url.includes('/git/trees/')) return { ok: true, json: async () => tree };
+      return { ok: true, text: async () => '# Repair\n\nRepair support.' };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const results = await createDocsClient().search('repair', {
+      limit: 1,
+      pathPrefix: 'repair',
+    });
+
+    expect(results).toHaveLength(1);
+    expect(results[0]?.path.startsWith('repair/')).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('returns partial results when one document cannot be loaded', async () => {
+    const tree = {
+      truncated: false,
+      tree: [
+        { path: 'repair/available.md', type: 'blob' },
+        { path: 'repair/missing.md', type: 'blob' },
+      ],
+    };
+    const fetchMock = vi.fn().mockImplementation(async (url: string) => {
+      if (url.includes('/git/trees/')) return { ok: true, json: async () => tree };
+      if (url.endsWith('repair/missing.md')) return { ok: false, status: 404 };
+      return { ok: true, text: async () => '# Repair guide\n\nRepair support.' };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(createDocsClient().search('repair')).resolves.toMatchObject([
+      { path: 'repair/available.md', title: 'Repair guide' },
+    ]);
+  });
+
+  it('surfaces the failure when no document can be loaded', async () => {
+    const tree = {
+      truncated: false,
+      tree: [{ path: 'repair/missing.md', type: 'blob' }],
+    };
+    const fetchMock = vi
+      .fn()
+      .mockImplementation(async (url: string) =>
+        url.includes('/git/trees/')
+          ? { ok: true, json: async () => tree }
+          : { ok: false, status: 503 },
+      );
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(createDocsClient().search('repair')).rejects.toMatchObject({
+      name: 'DocsFetchError',
+      path: 'repair/missing.md',
+      status: 503,
+    });
+  });
+
+  it('rejects invalid queries and options without fetching', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const client = createDocsClient();
+
+    await expect(client.search('   ')).rejects.toBeInstanceOf(TypeError);
+    await expect(client.search('repair', { limit: -1 })).rejects.toBeInstanceOf(RangeError);
+    await expect(client.search('repair', { pathPrefix: '../private' })).rejects.toBeInstanceOf(
+      TypeError,
+    );
+    await expect(
+      client.search('repair', { limit: 0, pathPrefix: '../private' }),
+    ).rejects.toBeInstanceOf(TypeError);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

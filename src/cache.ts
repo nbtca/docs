@@ -8,7 +8,7 @@ export class TtlCache<T> {
 
   constructor(
     private readonly ttlMs: number,
-    private readonly maxSize: number = 50,
+    private readonly maxSize = 50,
   ) {}
 
   get(key: string): T | undefined {

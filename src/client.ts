@@ -1,6 +1,15 @@
 import { TtlCache } from './cache.js';
+import { parseDoc, searchDoc } from './content.js';
 import { DocsFetchError } from './types.js';
-import type { DocItem, DocsClient, DocsClientOptions } from './types.js';
+import type {
+  DocItem,
+  DocPage,
+  DocSection,
+  DocsClient,
+  DocsClientOptions,
+  DocsSearchOptions,
+  DocsSearchResult,
+} from './types.js';
 
 const DEFAULTS = {
   owner: 'nbtca',
@@ -10,16 +19,45 @@ const DEFAULTS = {
   fileTtlMs: 10 * 60 * 1000,
 } as const;
 
-const SKIP = new Set(['.github', '.husky', '.vitepress', '.vscode', 'node_modules',
-  'assets', 'public', 'scripts', 'utils', 'package.json', 'pnpm-lock.yaml',
-  'tsconfig.json', 'eslint.config.mjs', '.nvmrc', '.gitignore',
-  '.markdownlint-cli2.jsonc', 'CONTRIBUTING.md', 'CONTEXT.md']);
+const SKIP = new Set([
+  '.github',
+  '.husky',
+  '.vitepress',
+  '.vscode',
+  'node_modules',
+  'assets',
+  'public',
+  'scripts',
+  'utils',
+  'package.json',
+  'pnpm-lock.yaml',
+  'tsconfig.json',
+  'eslint.config.mjs',
+  '.nvmrc',
+  '.gitignore',
+  '.markdownlint-cli2.jsonc',
+  'CONTRIBUTING.md',
+  'CONTEXT.md',
+  'README.md',
+  'docs',
+]);
+
+const SEARCH_CONCURRENCY = 6;
+const SEARCH_RESULT_LIMIT = 20;
 
 function filterAndSort(raw: GitHubItem[]): DocItem[] {
   return raw
-    .filter(i => !i.name.startsWith('.') && !SKIP.has(i.name) &&
-      (i.type === 'dir' || (i.type === 'file' && i.name.endsWith('.md'))))
-    .map(i => ({ name: i.name, path: i.path, type: (i.type === 'dir' ? 'dir' : 'file') as 'dir' | 'file' }))
+    .filter(
+      (item) =>
+        !item.name.startsWith('.') &&
+        !SKIP.has(item.name) &&
+        (item.type === 'dir' || (item.type === 'file' && item.name.endsWith('.md'))),
+    )
+    .map((item): DocItem => ({
+      name: item.name,
+      path: item.path,
+      type: item.type === 'dir' ? 'dir' : 'file',
+    }))
     .sort((a, b) => {
       if (a.type !== b.type) return a.type === 'dir' ? -1 : 1;
       return a.name.localeCompare(b.name);
@@ -28,53 +66,122 @@ function filterAndSort(raw: GitHubItem[]): DocItem[] {
 
 function filterTree(items: GitHubTreeItem[]): DocItem[] {
   return items
-    .filter(i => {
-      const parts = i.path.split('/');
-      if (parts.some(p => p.startsWith('.') || SKIP.has(p))) return false;
-      // Only return .md files; directories are navigated via listDir
-      return i.type === 'blob' && i.path.endsWith('.md');
+    .filter((item) => {
+      const parts = item.path.split('/');
+      if (parts.some((part) => part.startsWith('.') || SKIP.has(part))) return false;
+      return item.type === 'blob' && item.path.endsWith('.md');
     })
-    .map(i => ({
-      name: i.path.split('/').pop()!,
-      path: i.path,
+    .map((item) => ({
+      name: item.path.slice(item.path.lastIndexOf('/') + 1),
+      path: item.path,
       type: 'file' as const,
     }))
     .sort((a, b) => a.path.localeCompare(b.path));
 }
 
 function copyItems(items: DocItem[]): DocItem[] {
-  return items.map(item => ({ ...item }));
+  return items.map((item) => ({ ...item }));
 }
 
-interface GitHubItem { name: string; path: string; type: string }
-interface GitHubTreeItem { path: string; type: string }
-interface GitHubTreeResponse { tree: GitHubTreeItem[]; truncated: boolean }
+function sectionsFromItems(items: DocItem[]): DocSection[] {
+  const sections = new Map<string, DocSection>();
+  for (const item of items) {
+    const separator = item.path.indexOf('/');
+    if (separator < 1) continue;
+    const path = item.path.slice(0, separator);
+    const current = sections.get(path) ?? { count: 0, path };
+    current.count += 1;
+    if (item.path === `${path}/index.md`) current.indexPath = item.path;
+    sections.set(path, current);
+  }
+  return [...sections.values()]
+    .map((section) => ({ ...section }))
+    .sort((left, right) => left.path.localeCompare(right.path));
+}
+
+function searchLimit(value: number | undefined): number {
+  const limit = value ?? SEARCH_RESULT_LIMIT;
+  if (!Number.isSafeInteger(limit) || limit < 0) {
+    throw new RangeError('limit must be a non-negative safe integer');
+  }
+  return limit;
+}
+
+async function mapConcurrent<T, U>(
+  values: readonly T[],
+  concurrency: number,
+  map: (value: T) => Promise<U>,
+): Promise<U[]> {
+  const results = new Array<U>(values.length);
+  let nextIndex = 0;
+  async function worker(): Promise<void> {
+    for (;;) {
+      const index = nextIndex;
+      nextIndex += 1;
+      if (index >= values.length) return;
+      const value = values[index];
+      if (value !== undefined) results[index] = await map(value);
+    }
+  }
+  const workers = Math.min(concurrency, values.length);
+  await Promise.all(Array.from({ length: workers }, worker));
+  return results;
+}
+
+interface GitHubItem {
+  name: string;
+  path: string;
+  type: string;
+}
+
+interface GitHubTreeItem {
+  path: string;
+  type: string;
+}
+
+interface GitHubTreeResponse {
+  tree: GitHubTreeItem[];
+  truncated: boolean;
+}
 
 function encodePath(path: string): string {
-  return path.split('/').map(encodeURIComponent).join('/');
+  return path
+    .split('/')
+    .map((segment) => encodeURIComponent(segment))
+    .join('/');
 }
 
 function assertRepositoryPath(path: string, allowEmpty: boolean): void {
   if (allowEmpty && path === '') return;
   const parts = path.split('/');
   if (
-    path === ''
-    || path.startsWith('/')
-    || path.endsWith('/')
-    || path.includes('\\')
-    || parts.some(part => part === '' || part === '.' || part === '..')
+    path === '' ||
+    path.startsWith('/') ||
+    path.endsWith('/') ||
+    path.includes('\\') ||
+    parts.some((part) => part === '' || part === '.' || part === '..')
   ) {
     throw new TypeError('path must be a normalized repository-relative path');
   }
 }
 
+function hasControlCharacter(value: string): boolean {
+  for (const character of value) {
+    const code = character.charCodeAt(0);
+    if (code <= 0x1f || code === 0x7f) return true;
+  }
+  return false;
+}
+
 function assertRepositoryCoordinate(value: string, name: string): void {
   if (
-    value === ''
-    || value !== value.trim()
-    || value === '.'
-    || value === '..'
-    || /[\/\\\u0000-\u001f\u007f]/.test(value)
+    value === '' ||
+    value !== value.trim() ||
+    value === '.' ||
+    value === '..' ||
+    value.includes('/') ||
+    value.includes('\\') ||
+    hasControlCharacter(value)
   ) {
     throw new TypeError(`${name} must be a valid GitHub repository coordinate`);
   }
@@ -83,11 +190,11 @@ function assertRepositoryCoordinate(value: string, name: string): void {
 function assertBranchRef(value: string): void {
   const parts = value.split('/');
   if (
-    value === ''
-    || value !== value.trim()
-    || value.includes('\\')
-    || /[\u0000-\u001f\u007f]/.test(value)
-    || parts.some(part => part === '' || part === '.' || part === '..')
+    value === '' ||
+    value !== value.trim() ||
+    value.includes('\\') ||
+    hasControlCharacter(value) ||
+    parts.some((part) => part === '' || part === '.' || part === '..')
   ) {
     throw new TypeError('branch must be a valid Git ref');
   }
@@ -105,18 +212,27 @@ function isTransientStatus(status: number): boolean {
   return status === 408 || status === 429 || status >= 500;
 }
 
+function reject(error: unknown): Promise<never> {
+  return Promise.reject(
+    error instanceof Error ? error : new Error('Operation failed with a non-error value'),
+  );
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
 function isGitHubItem(value: unknown): value is GitHubItem {
-  return isRecord(value) && typeof value.name === 'string' &&
-    typeof value.path === 'string' && typeof value.type === 'string';
+  return (
+    isRecord(value) &&
+    typeof value.name === 'string' &&
+    typeof value.path === 'string' &&
+    typeof value.type === 'string'
+  );
 }
 
 function isGitHubTreeItem(value: unknown): value is GitHubTreeItem {
-  return isRecord(value) && typeof value.path === 'string' &&
-    typeof value.type === 'string';
+  return isRecord(value) && typeof value.path === 'string' && typeof value.type === 'string';
 }
 
 function parseContentsResponse(value: unknown): GitHubItem[] {
@@ -127,8 +243,12 @@ function parseContentsResponse(value: unknown): GitHubItem[] {
 }
 
 function parseTreeResponse(value: unknown): GitHubTreeResponse {
-  if (!isRecord(value) || typeof value.truncated !== 'boolean' ||
-      !Array.isArray(value.tree) || !value.tree.every(isGitHubTreeItem)) {
+  if (
+    !isRecord(value) ||
+    typeof value.truncated !== 'boolean' ||
+    !Array.isArray(value.tree) ||
+    !value.tree.every(isGitHubTreeItem)
+  ) {
     throw new TypeError('Invalid GitHub tree response');
   }
   return { tree: value.tree, truncated: value.truncated };
@@ -141,17 +261,19 @@ export function createDocsClient(options: DocsClientOptions = {}): DocsClient {
   assertRepositoryCoordinate(owner, 'owner');
   assertRepositoryCoordinate(repo, 'repo');
   assertBranchRef(branch);
-  const token = options.token ?? (typeof process !== 'undefined'
-    ? (process.env['GITHUB_TOKEN'] ?? process.env['GH_TOKEN'])
-    : undefined);
+  const token =
+    options.token ??
+    (typeof process !== 'undefined'
+      ? (process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN)
+      : undefined);
   const apiRepoUrl = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
   const rawRepoUrl = `https://raw.githubusercontent.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
   const encodedBranch = encodeURIComponent(branch);
   const dirTtlMs = cacheTtl(options.cacheTtlMs?.dir, DEFAULTS.dirTtlMs, 'cacheTtlMs.dir');
   const fileTtlMs = cacheTtl(options.cacheTtlMs?.file, DEFAULTS.fileTtlMs, 'cacheTtlMs.file');
 
-  const dirCache  = new TtlCache<DocItem[]>(dirTtlMs, 30);
-  const fileCache = new TtlCache<string>(fileTtlMs, 50);
+  const dirCache = new TtlCache<DocItem[]>(dirTtlMs, 30);
+  const fileCache = new TtlCache<string>(fileTtlMs, 200);
   const treeCache = new TtlCache<DocItem[]>(dirTtlMs, 1);
   const dirRequests = new Map<string, Promise<DocItem[]>>();
   const fileRequests = new Map<string, Promise<string>>();
@@ -159,9 +281,11 @@ export function createDocsClient(options: DocsClientOptions = {}): DocsClient {
   let cacheGeneration = 0;
 
   function headers(): Record<string, string> {
-    const h: Record<string, string> = { 'Accept': 'application/vnd.github.v3+json' };
-    if (token) h['Authorization'] = `Bearer ${token}`;
-    return h;
+    const requestHeaders: Record<string, string> = {
+      Accept: 'application/vnd.github.v3+json',
+    };
+    if (token) requestHeaders.Authorization = `Bearer ${token}`;
+    return requestHeaders;
   }
 
   async function withResponse<T>(
@@ -170,7 +294,9 @@ export function createDocsClient(options: DocsClientOptions = {}): DocsClient {
     consume: (response: Response) => Promise<T>,
   ): Promise<T> {
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    const timer = setTimeout(() => {
+      ctrl.abort();
+    }, timeoutMs);
     try {
       const response = await fetch(url, { signal: ctrl.signal, headers: headers() });
       return await consume(response);
@@ -184,13 +310,12 @@ export function createDocsClient(options: DocsClientOptions = {}): DocsClient {
     key: string,
     path: string,
     error: unknown,
-    copy: (value: T) => T = value => value,
+    copy: (value: T) => T = (value) => value,
   ): T {
     const stale = cache.getStale(key);
     if (stale !== undefined) return copy(stale);
-    const message = error instanceof Error && error.name === 'AbortError'
-      ? 'Request timed out'
-      : String(error);
+    const message =
+      error instanceof Error && error.name === 'AbortError' ? 'Request timed out' : String(error);
     throw new DocsFetchError(path, null, message);
   }
 
@@ -210,23 +335,23 @@ export function createDocsClient(options: DocsClientOptions = {}): DocsClient {
     return request;
   }
 
-  async function loadDir(path: string, key: string, generation: number): Promise<DocItem[]> {
+  async function loadDir(path: string, generation: number): Promise<DocItem[]> {
     const url = `${apiRepoUrl}/contents/${encodePath(path)}?ref=${encodedBranch}`;
     try {
-      return await withResponse(url, 10_000, async response => {
+      return await withResponse(url, 10_000, async (response) => {
         if (!response.ok) {
-          const stale = dirCache.getStale(key);
+          const stale = dirCache.getStale(path);
           if (isTransientStatus(response.status) && stale !== undefined) return copyItems(stale);
-          throw new DocsFetchError(path, response.status, `HTTP ${response.status}`);
+          throw new DocsFetchError(path, response.status, `HTTP ${String(response.status)}`);
         }
         const data = parseContentsResponse(await response.json());
         const items = filterAndSort(data);
-        if (generation === cacheGeneration) dirCache.set(key, copyItems(items));
+        if (generation === cacheGeneration) dirCache.set(path, copyItems(items));
         return items;
       });
     } catch (error) {
       if (error instanceof DocsFetchError) throw error;
-      return recoverFailure(dirCache, key, path, error, copyItems);
+      return recoverFailure(dirCache, path, path, error, copyItems);
     }
   }
 
@@ -234,28 +359,32 @@ export function createDocsClient(options: DocsClientOptions = {}): DocsClient {
     try {
       assertRepositoryPath(path, true);
     } catch (error) {
-      return Promise.reject(error);
+      return reject(error);
     }
     const hit = dirCache.get(path);
     if (hit) return Promise.resolve(copyItems(hit));
-    return shareRequest(dirRequests, path, () => loadDir(path, path, cacheGeneration));
+    return shareRequest(dirRequests, path, () => loadDir(path, cacheGeneration)).then(copyItems);
   }
 
   async function loadAll(generation: number): Promise<DocItem[]> {
     const key = '__tree__';
     const url = `${apiRepoUrl}/git/trees/${encodedBranch}?recursive=1`;
     try {
-      return await withResponse(url, 20_000, async response => {
+      return await withResponse(url, 20_000, async (response) => {
         if (!response.ok) {
           const stale = treeCache.getStale(key);
           if (isTransientStatus(response.status) && stale !== undefined) return copyItems(stale);
-          throw new DocsFetchError('', response.status, `HTTP ${response.status}`);
+          throw new DocsFetchError('', response.status, `HTTP ${String(response.status)}`);
         }
         const data = parseTreeResponse(await response.json());
         if (data.truncated) {
           const stale = treeCache.getStale(key);
           if (stale !== undefined) return copyItems(stale);
-          throw new DocsFetchError('', null, 'GitHub truncated the repository tree (too many files) -- results would be incomplete');
+          throw new DocsFetchError(
+            '',
+            null,
+            'GitHub truncated the repository tree (too many files) -- results would be incomplete',
+          );
         }
         const items = filterTree(data.tree);
         if (generation === cacheGeneration) treeCache.set(key, copyItems(items));
@@ -271,17 +400,21 @@ export function createDocsClient(options: DocsClientOptions = {}): DocsClient {
     const key = '__tree__';
     const hit = treeCache.get(key);
     if (hit) return Promise.resolve(copyItems(hit));
-    return shareRequest(treeRequests, key, () => loadAll(cacheGeneration));
+    return shareRequest(treeRequests, key, () => loadAll(cacheGeneration)).then(copyItems);
+  }
+
+  async function listSections(): Promise<DocSection[]> {
+    return sectionsFromItems(await listAll());
   }
 
   async function loadFile(path: string, generation: number): Promise<string> {
     const url = `${rawRepoUrl}/${encodedBranch}/${encodePath(path)}`;
     try {
-      return await withResponse(url, 15_000, async response => {
+      return await withResponse(url, 15_000, async (response) => {
         if (!response.ok) {
           const stale = fileCache.getStale(path);
           if (isTransientStatus(response.status) && stale !== undefined) return stale;
-          throw new DocsFetchError(path, response.status, `HTTP ${response.status}`);
+          throw new DocsFetchError(path, response.status, `HTTP ${String(response.status)}`);
         }
         const content = await response.text();
         if (generation === cacheGeneration) fileCache.set(path, content);
@@ -297,11 +430,54 @@ export function createDocsClient(options: DocsClientOptions = {}): DocsClient {
     try {
       assertRepositoryPath(path, false);
     } catch (error) {
-      return Promise.reject(error);
+      return reject(error);
     }
     const hit = fileCache.get(path);
     if (hit !== undefined) return Promise.resolve(hit);
     return shareRequest(fileRequests, path, () => loadFile(path, cacheGeneration));
+  }
+
+  async function getDocument(path: string): Promise<DocPage> {
+    if (!path.toLowerCase().endsWith('.md')) {
+      throw new TypeError('path must point to a Markdown document');
+    }
+    return parseDoc(path, await getFile(path));
+  }
+
+  async function search(
+    query: string,
+    options: DocsSearchOptions = {},
+  ): Promise<DocsSearchResult[]> {
+    const normalizedQuery = query.trim();
+    if (!normalizedQuery) throw new TypeError('query must not be empty');
+    const limit = searchLimit(options.limit);
+    const pathPrefix = options.pathPrefix ?? '';
+    assertRepositoryPath(pathPrefix, true);
+    if (limit === 0) return [];
+    const all = await listAll();
+    const candidates = pathPrefix
+      ? all.filter((item) => item.path.startsWith(`${pathPrefix}/`))
+      : all;
+    let loaded = 0;
+    let firstFailure: DocsFetchError | undefined;
+    const matches = await mapConcurrent(candidates, SEARCH_CONCURRENCY, async (item) => {
+      try {
+        const document = await getDocument(item.path);
+        loaded += 1;
+        return searchDoc(document, normalizedQuery);
+      } catch (error) {
+        if (error instanceof DocsFetchError) {
+          firstFailure ??= error;
+          return null;
+        }
+        throw error;
+      }
+    });
+    if (loaded === 0 && firstFailure) throw firstFailure;
+    return matches
+      .filter((result): result is DocsSearchResult => result !== null)
+      .sort((left, right) => right.score - left.score || left.path.localeCompare(right.path))
+      .slice(0, limit);
   }
 
   function clear(): void {
@@ -314,5 +490,5 @@ export function createDocsClient(options: DocsClientOptions = {}): DocsClient {
     treeRequests.clear();
   }
 
-  return { listDir, listAll, getFile, clear };
+  return { listDir, listAll, listSections, getFile, getDocument, search, clear };
 }
