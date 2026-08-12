@@ -31,7 +31,7 @@ describe('TtlCache', () => {
     vi.advanceTimersByTime(1);
     c.set('b', 2);
     vi.advanceTimersByTime(1);
-    c.set('c', 3); // should evict 'a'
+    c.set('c', 3);
     expect(c.get('a')).toBeUndefined();
     expect(c.get('b')).toBe(2);
     expect(c.get('c')).toBe(3);
