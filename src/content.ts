@@ -2,10 +2,23 @@ import type { DocComponent, DocPage, DocsSearchResult } from './types.js';
 
 const SUMMARY_LENGTH = 160;
 const EXCERPT_LENGTH = 180;
+const GRAPHEME_SEGMENTER = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
 
 interface ParsedSource {
   body: string;
   frontmatter: string;
+}
+
+interface MarkdownFence {
+  length: number;
+  listIndent: number;
+  marker: '`' | '~';
+  quoteDepth: number;
+}
+
+interface FenceTransition {
+  delimiter: boolean;
+  fence: MarkdownFence | undefined;
 }
 
 const COMPONENT_ATTRIBUTES: Readonly<Record<string, readonly string[]>> = {
@@ -18,10 +31,11 @@ const COMPONENT_ATTRIBUTES: Readonly<Record<string, readonly string[]>> = {
 };
 
 function splitFrontmatter(content: string): ParsedSource {
-  const match = /^(?:\uFEFF)?---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/.exec(content);
-  if (!match) return { body: content, frontmatter: '' };
+  const source = content.startsWith('\uFEFF') ? content.slice(1) : content;
+  const match = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/.exec(source);
+  if (!match) return { body: source, frontmatter: '' };
   return {
-    body: content.slice(match[0].length),
+    body: source.slice(match[0].length),
     frontmatter: match[1] ?? '',
   };
 }
@@ -66,16 +80,74 @@ function cleanInline(value: string): string {
     .trim();
 }
 
-function extractTitle(body: string): string | undefined {
-  let fence: string | undefined;
-  for (const line of body.split(/\r?\n/)) {
-    const marker = /^\s*(`{3,}|~{3,})/.exec(line)?.[1]?.slice(0, 1);
-    if (marker) {
-      if (!fence) fence = marker;
-      else if (marker === fence) fence = undefined;
-      continue;
+function quoteContainer(line: string): { depth: number; rest: string } {
+  let depth = 0;
+  let rest = line;
+  for (;;) {
+    const prefix = /^ {0,3}>[ \t]?/.exec(rest)?.[0];
+    if (!prefix) return { depth, rest };
+    depth += 1;
+    rest = rest.slice(prefix.length);
+  }
+}
+
+function transitionFence(line: string, current: MarkdownFence | undefined): FenceTransition {
+  const quote = quoteContainer(line);
+  let candidate = quote.rest;
+  let listIndent = 0;
+  if (current) {
+    if (quote.depth < current.quoteDepth) return transitionFence(line, undefined);
+    if (quote.depth !== current.quoteDepth) return { delimiter: false, fence: current };
+    if (current.listIndent > 0) {
+      const indentation = /^ */.exec(candidate)?.[0].length ?? 0;
+      if (candidate.trim() !== '' && indentation < current.listIndent) {
+        return transitionFence(line, undefined);
+      }
+      candidate = candidate.slice(Math.min(indentation, current.listIndent));
     }
-    if (fence) continue;
+  } else {
+    const listPrefix = /^ {0,3}(?:(?:[-+*]|\d{1,9}[.)]))[ \t]+/.exec(candidate)?.[0] ?? '';
+    listIndent = listPrefix.length;
+    candidate = candidate.slice(listIndent);
+  }
+  const match = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(candidate);
+  const sequence = match?.[1];
+  if (!sequence) return { delimiter: false, fence: current };
+  const marker = sequence.startsWith('`') ? '`' : '~';
+  const suffix = match[2] ?? '';
+
+  if (!current) {
+    if (marker === '`' && suffix.includes('`')) {
+      return { delimiter: false, fence: undefined };
+    }
+    return {
+      delimiter: true,
+      fence: { length: sequence.length, listIndent, marker, quoteDepth: quote.depth },
+    };
+  }
+
+  if (marker === current.marker && sequence.length >= current.length && /^[ \t]*$/.test(suffix)) {
+    return { delimiter: true, fence: undefined };
+  }
+  return { delimiter: false, fence: current };
+}
+
+function isIndentedCodeLine(line: string): boolean {
+  const candidate = quoteContainer(line).rest;
+  if (/^(?: {4}|\t)/.test(candidate)) return true;
+  const list = /^ {0,3}(?:[-+*]|\d{1,9}[.)])([ \t]+)(.*)$/.exec(candidate);
+  if (!list) return false;
+  const padding = list[1] ?? '';
+  return padding.includes('\t') || padding.length >= 5 || /^(?: {4}|\t)/.test(list[2] ?? '');
+}
+
+function extractTitle(body: string): string | undefined {
+  let fence: MarkdownFence | undefined;
+  for (const line of body.split(/\r?\n/)) {
+    const transition = transitionFence(line, fence);
+    fence = transition.fence;
+    if (transition.delimiter || fence) continue;
+    if (isIndentedCodeLine(line)) continue;
     const match = /^#\s+(.+?)\s*$/.exec(line);
     if (match?.[1]) return cleanInline(match[1].replace(/\s+#+\s*$/, ''));
   }
@@ -92,7 +164,7 @@ function truncate(value: string, length: number): string {
 function extractSummary(body: string): string {
   const paragraphs: string[] = [];
   let current: string[] = [];
-  let fence: string | undefined;
+  let fence: MarkdownFence | undefined;
   let inContainer = false;
   let inTag = false;
   let hiddenTag: 'script' | 'style' | undefined;
@@ -103,15 +175,17 @@ function extractSummary(body: string): string {
   };
 
   for (const rawLine of body.split(/\r?\n/)) {
-    const line = rawLine.trim();
-    const marker = /^(`{3,}|~{3,})/.exec(line)?.[1]?.slice(0, 1);
-    if (marker) {
-      if (!fence) fence = marker;
-      else if (marker === fence) fence = undefined;
+    const transition = transitionFence(rawLine, fence);
+    fence = transition.fence;
+    if (transition.delimiter || fence) {
       finishParagraph();
       continue;
     }
-    if (fence) continue;
+    if (isIndentedCodeLine(rawLine)) {
+      finishParagraph();
+      continue;
+    }
+    const line = rawLine.trim();
     if (hiddenTag) {
       if (line.toLowerCase().includes(`</${hiddenTag}>`)) hiddenTag = undefined;
       continue;
@@ -178,15 +252,11 @@ function parseAttributes(source: string): Readonly<Record<string, string | true>
 
 function componentSource(body: string): string {
   const lines: string[] = [];
-  let fence: string | undefined;
+  let fence: MarkdownFence | undefined;
   for (const line of body.split(/\r?\n/)) {
-    const marker = /^\s*(`{3,}|~{3,})/.exec(line)?.[1]?.slice(0, 1);
-    if (marker) {
-      if (!fence) fence = marker;
-      else if (marker === fence) fence = undefined;
-      continue;
-    }
-    if (!fence) lines.push(line);
+    const transition = transitionFence(line, fence);
+    fence = transition.fence;
+    if (!transition.delimiter && !fence && !isIndentedCodeLine(line)) lines.push(line);
   }
   return lines.join('\n').replace(/<!--[\s\S]*?-->/g, ' ');
 }
@@ -262,7 +332,76 @@ export function parseDoc(path: string, content: string): DocPage {
 }
 
 function normalize(value: string): string {
-  return value.normalize('NFKC').toLowerCase();
+  // JavaScript lowercasing preserves Greek final sigma (ς), while a
+  // case-insensitive search for Σ produces σ. Fold the positional variants to
+  // one form after NFKC/lowercase so substring matching is position agnostic.
+  return value
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/\u03c2/g, '\u03c3');
+}
+
+interface NormalizedIndex {
+  boundaries: number[];
+  codePoints: number[];
+  value: string;
+}
+
+function indexNormalizedText(value: string): NormalizedIndex {
+  const boundaries: number[] = [];
+  const codePoints: number[] = [];
+  for (const part of GRAPHEME_SEGMENTER.segment(value)) {
+    boundaries.push(part.index);
+    codePoints.push(Array.from(part.segment).length);
+  }
+  boundaries.push(value.length);
+  return { boundaries, codePoints, value: normalize(value) };
+}
+
+function sourceBoundaryForNormalizedOffset(
+  text: string,
+  indexed: NormalizedIndex,
+  normalizedOffset: number,
+): number {
+  // NFKC may compose across grapheme boundaries (for example compatibility
+  // Jamo ㄱ + ㅏ -> 가), so independently normalizing each grapheme cannot
+  // produce a correct offset map. Normalized prefix lengths are monotonic:
+  // composition may create a plateau but cannot remove prior output. Binary
+  // search those true whole-prefix lengths instead.
+  let low = 0;
+  let high = indexed.boundaries.length - 1;
+  const lengths = new Map<number, number>([
+    [0, 0],
+    [high, indexed.value.length],
+  ]);
+  const prefixLength = (boundary: number): number => {
+    const cached = lengths.get(boundary);
+    if (cached !== undefined) return cached;
+    const length = normalize(text.slice(0, indexed.boundaries[boundary])).length;
+    lengths.set(boundary, length);
+    return length;
+  };
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (prefixLength(middle) <= normalizedOffset) low = middle;
+    else high = middle - 1;
+  }
+  return low;
+}
+
+function sourceBoundaryForNormalizedEnd(
+  text: string,
+  indexed: NormalizedIndex,
+  normalizedOffset: number,
+): number {
+  const floor = sourceBoundaryForNormalizedOffset(text, indexed, normalizedOffset);
+  const floorLength = normalize(text.slice(0, indexed.boundaries[floor])).length;
+  // An offset inside an expanded source grapheme (İ -> i + dot, ﬁ -> fi)
+  // needs the following boundary. Exact offsets use the end of their plateau,
+  // which also captures composition across boundaries (ㄱ + ㅏ -> 가).
+  return floorLength < normalizedOffset
+    ? Math.min(floor + 1, indexed.boundaries.length - 1)
+    : floor;
 }
 
 function countMatches(value: string, term: string): number {
@@ -279,18 +418,61 @@ function countMatches(value: string, term: string): number {
 
 function excerpt(text: string, query: string, terms: string[]): string {
   if (!text) return '';
-  const normalized = normalize(text);
+  const indexed = indexNormalizedText(text);
+  const normalized = indexed.value;
   const exactIndex = normalized.indexOf(query);
-  const matchIndex =
-    exactIndex >= 0
-      ? exactIndex
-      : Math.min(...terms.map((term) => normalized.indexOf(term)).filter((index) => index >= 0));
+  let matchIndex = exactIndex;
+  let matchLength = query.length;
+  if (matchIndex < 0) {
+    matchIndex = Number.POSITIVE_INFINITY;
+    for (const term of terms) {
+      const index = normalized.indexOf(term);
+      if (index >= 0 && index < matchIndex) {
+        matchIndex = index;
+        matchLength = term.length;
+      }
+    }
+  }
   if (!Number.isFinite(matchIndex)) return truncate(text, EXCERPT_LENGTH);
 
-  const start = Math.max(0, matchIndex - Math.floor(EXCERPT_LENGTH / 3));
+  const matchStartGrapheme = sourceBoundaryForNormalizedOffset(text, indexed, matchIndex);
+  const matchEndGrapheme = sourceBoundaryForNormalizedEnd(
+    text,
+    indexed,
+    Math.min(normalized.length, matchIndex + matchLength),
+  );
+  let matchCodePoints = 0;
+  for (let index = matchStartGrapheme; index < matchEndGrapheme; index += 1) {
+    matchCodePoints += indexed.codePoints[index] ?? 0;
+  }
+
+  // Anchor the window to the source match rather than subtracting from its
+  // normalized offset: NFKC can contract one source grapheme (for example a
+  // three-code-point Hangul Jamo sequence) to one indexed character. Reserve
+  // room for the complete source match when it fits; overlong matches are
+  // sensibly shown from their beginning and truncated to the normal window.
+  const contextLimit = Math.min(
+    Math.floor(EXCERPT_LENGTH / 3),
+    Math.max(0, EXCERPT_LENGTH - matchCodePoints),
+  );
+  let startGrapheme = matchStartGrapheme;
+  let contextCodePoints = 0;
+  while (startGrapheme > 0) {
+    const previousLength = indexed.codePoints[startGrapheme - 1] ?? 0;
+    if (contextCodePoints + previousLength > contextLimit) break;
+    contextCodePoints += previousLength;
+    startGrapheme -= 1;
+  }
+  const start = indexed.boundaries[startGrapheme] ?? 0;
   const prefix = start > 0 ? '…' : '';
-  const value = text.slice(start, start + EXCERPT_LENGTH).trim();
-  const suffix = start + EXCERPT_LENGTH < text.length ? '…' : '';
+  const characters: string[] = [];
+  for (const character of text.slice(start)) {
+    if (characters.length >= EXCERPT_LENGTH) break;
+    characters.push(character);
+  }
+  const selected = characters.join('');
+  const value = selected.trim();
+  const suffix = start + selected.length < text.length ? '…' : '';
   return `${prefix}${value}${suffix}`;
 }
 

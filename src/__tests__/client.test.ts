@@ -250,6 +250,184 @@ describe('createDocsClient', () => {
       expect(stale).toEqual(fresh);
     });
 
+    it.each([
+      ['primary', { 'x-ratelimit-remaining': '0' }],
+      ['secondary', { 'retry-after': '60' }],
+    ])('listDir returns stale data during a GitHub %s rate limit', async (_kind, headers) => {
+      const fn = vi
+        .fn()
+        .mockResolvedValueOnce({ ok: true, json: async () => mockDir })
+        .mockResolvedValue({ ok: false, status: 403, headers: new Headers(headers) });
+      vi.stubGlobal('fetch', fn);
+      const client = createDocsClient({ cacheTtlMs: { dir: 1000 } });
+      const fresh = await client.listDir('repair');
+      vi.advanceTimersByTime(1001);
+      await expect(client.listDir('repair')).resolves.toEqual(fresh);
+    });
+
+    it('cancels an unconsumed rate-limit body after returning stale data', async () => {
+      const limited = new Response('{"message":"rate limited"}', {
+        status: 403,
+        headers: { 'x-ratelimit-remaining': '0' },
+      });
+      if (!limited.body) throw new Error('expected a response body');
+      const cancel = vi
+        .spyOn(limited.body, 'cancel')
+        .mockImplementation(() => new Promise<void>(() => undefined));
+      const fn = vi.fn().mockResolvedValueOnce(Response.json(mockDir)).mockResolvedValue(limited);
+      vi.stubGlobal('fetch', fn);
+      const client = createDocsClient({ cacheTtlMs: { dir: 1000 } });
+      const fresh = await client.listDir('repair');
+      vi.advanceTimersByTime(1001);
+
+      await expect(client.listDir('repair')).resolves.toEqual(fresh);
+      expect(cancel).toHaveBeenCalledOnce();
+    });
+
+    it('does not cancel a successfully consumed response body', async () => {
+      const response = Response.json(mockDir);
+      if (!response.body) throw new Error('expected a response body');
+      const cancel = vi.spyOn(response.body, 'cancel');
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response));
+
+      await expect(createDocsClient().listDir('repair')).resolves.toHaveLength(2);
+      expect(response.bodyUsed).toBe(true);
+      expect(cancel).not.toHaveBeenCalled();
+    });
+
+    it('does not let an inaccessible response body override a successful result', async () => {
+      const response = {
+        bodyUsed: false,
+        headers: new Headers(),
+        json: async () => mockDir,
+        ok: true,
+        status: 200,
+        get body(): never {
+          throw new Error('body getter exploded');
+        },
+      } as unknown as Response;
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response));
+
+      await expect(createDocsClient().listDir('repair')).resolves.toHaveLength(2);
+    });
+
+    it.each([
+      ['without rate-limit headers', undefined],
+      ['with remaining quota', { 'x-ratelimit-remaining': '42' }],
+    ])(
+      'returns stale data when a GitHub 403 body identifies a secondary rate limit %s',
+      async (_kind, headers) => {
+        const fn = vi
+          .fn()
+          .mockResolvedValueOnce({ ok: true, json: async () => mockDir })
+          .mockResolvedValue(
+            Response.json(
+              {
+                message:
+                  'You have exceeded a secondary rate limit. Please wait a few minutes before you try again.',
+              },
+              { status: 403, ...(headers ? { headers } : {}) },
+            ),
+          );
+        vi.stubGlobal('fetch', fn);
+        const client = createDocsClient({ cacheTtlMs: { dir: 1000 } });
+        const fresh = await client.listDir('repair');
+        vi.advanceTimersByTime(1001);
+        await expect(client.listDir('repair')).resolves.toEqual(fresh);
+      },
+    );
+
+    it('listAll returns stale data for a body-only secondary rate limit', async () => {
+      const limited = Response.json(
+        { message: 'You have exceeded a secondary rate limit.' },
+        { status: 403 },
+      );
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValueOnce(Response.json(mockTree)).mockResolvedValue(limited),
+      );
+      const client = createDocsClient({ cacheTtlMs: { dir: 1000 } });
+      const fresh = await client.listAll();
+      vi.advanceTimersByTime(1001);
+
+      await expect(client.listAll()).resolves.toEqual(fresh);
+      expect(limited.bodyUsed).toBe(true);
+    });
+
+    it('getFile returns stale data for a body-only secondary rate limit', async () => {
+      const limited = Response.json(
+        { message: 'You have triggered a secondary rate limit.' },
+        { status: 403 },
+      );
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValueOnce(new Response('cached')).mockResolvedValue(limited),
+      );
+      const client = createDocsClient({ cacheTtlMs: { file: 1000 } });
+      await expect(client.getFile('repair/guide.md')).resolves.toBe('cached');
+      vi.advanceTimersByTime(1001);
+
+      await expect(client.getFile('repair/guide.md')).resolves.toBe('cached');
+      expect(limited.bodyUsed).toBe(true);
+    });
+
+    it('does not hide an ordinary JSON 403 response behind stale data', async () => {
+      const fn = vi
+        .fn()
+        .mockResolvedValueOnce({ ok: true, json: async () => mockDir })
+        .mockResolvedValue(
+          Response.json(
+            { message: 'Resource not accessible by integration' },
+            {
+              status: 403,
+              headers: { 'x-ratelimit-remaining': '42' },
+            },
+          ),
+        );
+      vi.stubGlobal('fetch', fn);
+      const client = createDocsClient({ cacheTtlMs: { dir: 1000 } });
+      await client.listDir('repair');
+      vi.advanceTimersByTime(1001);
+      await expect(client.listDir('repair')).rejects.toMatchObject({ status: 403 });
+    });
+
+    it('treats an unreadable 403 body as a permanent error', async () => {
+      const fn = vi
+        .fn()
+        .mockResolvedValueOnce({ ok: true, json: async () => mockDir })
+        .mockResolvedValue({
+          ok: false,
+          status: 403,
+          headers: new Headers({ 'x-ratelimit-remaining': '42' }),
+          clone: () => ({
+            json: async () => {
+              throw new Error('stream closed');
+            },
+          }),
+        });
+      vi.stubGlobal('fetch', fn);
+      const client = createDocsClient({ cacheTtlMs: { dir: 1000 } });
+      await client.listDir('repair');
+      vi.advanceTimersByTime(1001);
+      await expect(client.listDir('repair')).rejects.toMatchObject({ status: 403 });
+    });
+
+    it('does not hide a non-rate-limit 403 response behind stale data', async () => {
+      const fn = vi
+        .fn()
+        .mockResolvedValueOnce({ ok: true, json: async () => mockDir })
+        .mockResolvedValue({
+          ok: false,
+          status: 403,
+          headers: new Headers({ 'x-ratelimit-remaining': '42' }),
+        });
+      vi.stubGlobal('fetch', fn);
+      const client = createDocsClient({ cacheTtlMs: { dir: 1000 } });
+      await client.listDir('repair');
+      vi.advanceTimersByTime(1001);
+      await expect(client.listDir('repair')).rejects.toMatchObject({ status: 403 });
+    });
+
     it('does not hide a permanent HTTP error behind stale data', async () => {
       const fn = vi
         .fn()

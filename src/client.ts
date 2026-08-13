@@ -212,10 +212,48 @@ function isTransientStatus(status: number): boolean {
   return status === 408 || status === 429 || status >= 500;
 }
 
+function isSecondaryRateLimitMessage(value: unknown): boolean {
+  if (!isRecord(value) || typeof value.message !== 'string') return false;
+  const message = value.message.toLowerCase().replace(/\s+/g, ' ').trim();
+  return (
+    /\b(?:exceeded|hit|triggered) (?:a |the )?secondary rate limit\b/.test(message) ||
+    /\bsecondary rate limit (?:was |has been )?(?:exceeded|hit|triggered)\b/.test(message)
+  );
+}
+
+async function isTransientResponse(response: Response): Promise<boolean> {
+  if (isTransientStatus(response.status)) return true;
+  if (response.status !== 403) return false;
+  if (
+    response.headers.get('x-ratelimit-remaining') === '0' ||
+    response.headers.get('retry-after') !== null
+  ) {
+    return true;
+  }
+  try {
+    return isSecondaryRateLimitMessage(await response.clone().json());
+  } catch {
+    return false;
+  }
+}
+
 function reject(error: unknown): Promise<never> {
   return Promise.reject(
     error instanceof Error ? error : new Error('Operation failed with a non-error value'),
   );
+}
+
+function cancelUnusedResponseBody(response: Response | undefined): void {
+  try {
+    if (!response || response.bodyUsed) return;
+    const body = response.body;
+    if (!body) return;
+    void body.cancel().catch(() => {
+      // A transport may close or lock the body while the request settles.
+    });
+  } catch {
+    // Cleanup is best-effort and must not override the request result.
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -297,11 +335,15 @@ export function createDocsClient(options: DocsClientOptions = {}): DocsClient {
     const timer = setTimeout(() => {
       ctrl.abort();
     }, timeoutMs);
+    let response: Response | undefined;
     try {
-      const response = await fetch(url, { signal: ctrl.signal, headers: headers() });
+      response = await fetch(url, { signal: ctrl.signal, headers: headers() });
       return await consume(response);
     } finally {
       clearTimeout(timer);
+      // Cleanup must not delay a stale-cache result if a custom transport's
+      // cancel implementation never settles.
+      cancelUnusedResponseBody(response);
     }
   }
 
@@ -341,7 +383,7 @@ export function createDocsClient(options: DocsClientOptions = {}): DocsClient {
       return await withResponse(url, 10_000, async (response) => {
         if (!response.ok) {
           const stale = dirCache.getStale(path);
-          if (isTransientStatus(response.status) && stale !== undefined) return copyItems(stale);
+          if (stale !== undefined && (await isTransientResponse(response))) return copyItems(stale);
           throw new DocsFetchError(path, response.status, `HTTP ${String(response.status)}`);
         }
         const data = parseContentsResponse(await response.json());
@@ -373,7 +415,7 @@ export function createDocsClient(options: DocsClientOptions = {}): DocsClient {
       return await withResponse(url, 20_000, async (response) => {
         if (!response.ok) {
           const stale = treeCache.getStale(key);
-          if (isTransientStatus(response.status) && stale !== undefined) return copyItems(stale);
+          if (stale !== undefined && (await isTransientResponse(response))) return copyItems(stale);
           throw new DocsFetchError('', response.status, `HTTP ${String(response.status)}`);
         }
         const data = parseTreeResponse(await response.json());
@@ -413,7 +455,7 @@ export function createDocsClient(options: DocsClientOptions = {}): DocsClient {
       return await withResponse(url, 15_000, async (response) => {
         if (!response.ok) {
           const stale = fileCache.getStale(path);
-          if (isTransientStatus(response.status) && stale !== undefined) return stale;
+          if (stale !== undefined && (await isTransientResponse(response))) return stale;
           throw new DocsFetchError(path, response.status, `HTTP ${String(response.status)}`);
         }
         const content = await response.text();

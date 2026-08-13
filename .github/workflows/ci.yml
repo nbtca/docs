@@ -6,14 +6,81 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
+    name: Test (Node ${{ matrix.node }})
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['20.12.0', '22', '24']
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
-          node-version: '20'
+          node-version: ${{ matrix.node }}
+          cache: 'npm'
+      - run: npm ci
+      - run: npm test
+
+  quality:
+    name: Package
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
           cache: 'npm'
       - run: npm ci
       - run: npm run check
+
+  prompt-consumer:
+    name: Prompt consumer
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '20.12.0'
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run build
+
+      - name: Pack docs
+        id: docs-package
+        run: |
+          tarball=$(npm pack --silent --pack-destination "$RUNNER_TEMP")
+          echo "tarball=$RUNNER_TEMP/$tarball" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout Prompt
+        uses: actions/checkout@v7
+        with:
+          repository: nbtca/Prompt
+          ref: main
+          path: integration/Prompt
+
+      - name: Install Prompt
+        working-directory: integration/Prompt
+        run: npm ci
+
+      - name: Check Prompt against this docs package
+        working-directory: integration/Prompt
+        env:
+          NBTCA_DOCS_TARBALL: ${{ steps.docs-package.outputs.tarball }}
+        run: |
+          npm install --ignore-scripts --no-save --package-lock=false "$NBTCA_DOCS_TARBALL"
+          npm run typecheck
+          npx vitest run --root src
+          npm run test:cli
+          npm run check:package
