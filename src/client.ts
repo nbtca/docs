@@ -356,6 +356,7 @@ export function createDocsClient(options: DocsClientOptions = {}): DocsClient {
   const rawRepoUrl = `https://raw.githubusercontent.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
   const encodedBranch = encodeURIComponent(branch);
   const mirror = mirrorBase(options.mirror);
+  let mirrorFailed = false;
   const dirTtlMs = cacheTtl(options.cacheTtlMs?.dir, DEFAULTS.dirTtlMs, 'cacheTtlMs.dir');
   const fileTtlMs = cacheTtl(options.cacheTtlMs?.file, DEFAULTS.fileTtlMs, 'cacheTtlMs.file');
 
@@ -426,14 +427,19 @@ export function createDocsClient(options: DocsClientOptions = {}): DocsClient {
     path: string,
     read: (response: Response) => Promise<T | undefined>,
   ): Promise<T | undefined> {
+    if (mirrorFailed) return undefined;
     try {
       return await withResponse(
         `${base}/${path}`,
         MIRROR_TIMEOUT_MS,
-        async (response) => (response.ok ? await read(response) : undefined),
+        async (response) => {
+          if (response.status >= 500) mirrorFailed = true;
+          return response.ok ? await read(response) : undefined;
+        },
         {},
       );
     } catch {
+      mirrorFailed = true;
       return undefined;
     }
   }

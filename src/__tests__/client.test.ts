@@ -1105,7 +1105,7 @@ describe('mirror', () => {
     ]);
   });
 
-  it('falls back to GitHub when the mirror fails', async () => {
+  it('falls back to GitHub when the mirror fails and stops asking it', async () => {
     const fetchMock = routes({
       mirror: () => ({ ok: false, status: 503 }),
       github: (url) =>
@@ -1117,7 +1117,30 @@ describe('mirror', () => {
 
     await expect(client.listAll()).resolves.toHaveLength(3);
     await expect(client.getFile('intro.md')).resolves.toBe('# From GitHub');
-    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('keeps using the mirror after a single missing file', async () => {
+    const fetchMock = routes({
+      mirror: (url) =>
+        url.endsWith('/index.json')
+          ? { ok: true, json: async () => mirrorTree }
+          : url.endsWith('/raw/intro.md')
+            ? { ok: false, status: 404 }
+            : { ok: true, text: async () => '# From mirror' },
+      github: () => ({ ok: true, text: async () => '# From GitHub' }),
+    });
+    const client = createDocsClient({ mirror });
+
+    await client.listAll();
+    await expect(client.getFile('intro.md')).resolves.toBe('# From GitHub');
+    await expect(client.getFile('guide/setup.md')).resolves.toBe('# From mirror');
+    expect(fetchMock.mock.calls.map(([url]) => String(url).split('/')[2])).toEqual([
+      'docs.example.org',
+      'docs.example.org',
+      'raw.githubusercontent.com',
+      'docs.example.org',
+    ]);
   });
 
   it.each([
