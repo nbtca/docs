@@ -1,6 +1,6 @@
 {
   "name": "@nbtca/docs",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "GitHub-backed document client for NBTCA",
   "type": "module",
   "main": "./dist/index.js",
