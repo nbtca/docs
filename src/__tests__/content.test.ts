@@ -258,6 +258,37 @@ describe('parseDoc', () => {
     expect(page.title).toBe('indented-code');
   });
 
+  it.each([
+    ['four spaces', '    '],
+    ['a tab', '\t'],
+  ])('keeps component attributes indented with %s', (_kind, indent) => {
+    const page = parseDoc(
+      'tutorial/indented-attributes.md',
+      ['<PageHero', `${indent}title="Hero"`, `${indent}lede="Lede text"`, '/>'].join('\n'),
+    );
+
+    expect(page.components).toEqual([
+      { attributes: { lede: 'Lede text', title: 'Hero' }, name: 'PageHero' },
+    ]);
+    expect(page.title).toBe('Hero');
+    expect(page.summary).toBe('Lede text');
+  });
+
+  it('keeps a component nested four spaces under a list item', () => {
+    const page = parseDoc(
+      'tutorial/list-component.md',
+      '1. Step\n\n    <Figure caption="Step one" />',
+    );
+
+    expect(page.components).toEqual([{ attributes: { caption: 'Step one' }, name: 'Figure' }]);
+  });
+
+  it('keeps an indented lazy continuation in the summary', () => {
+    const page = parseDoc('tutorial/lazy.md', 'Intro line one\n    continued lazily here');
+
+    expect(page.summary).toBe('Intro line one continued lazily here');
+  });
+
   it('keeps shorter nested fences inside a longer fenced example', () => {
     const page = parseDoc(
       'tutorial/nested-fence.md',
