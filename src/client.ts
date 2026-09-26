@@ -248,11 +248,9 @@ function cancelUnusedResponseBody(response: Response | undefined): void {
     if (!response || response.bodyUsed) return;
     const body = response.body;
     if (!body) return;
-    void body.cancel().catch(() => {
-      // A transport may close or lock the body while the request settles.
-    });
+    void body.cancel().catch(() => undefined);
   } catch {
-    // Cleanup is best-effort and must not override the request result.
+    // Cleanup must not override the request result.
   }
 }
 
@@ -341,8 +339,7 @@ export function createDocsClient(options: DocsClientOptions = {}): DocsClient {
       return await consume(response);
     } finally {
       clearTimeout(timer);
-      // Cleanup must not delay a stale-cache result if a custom transport's
-      // cancel implementation never settles.
+      // Not awaited: a custom transport's cancel may never settle.
       cancelUnusedResponseBody(response);
     }
   }

@@ -142,6 +142,18 @@ describe('parseDoc', () => {
     expect(searchDoc(page, 'needle')?.excerpt).toContain('😀…');
   });
 
+  it('keeps a grapheme cluster intact at the end of a search excerpt', () => {
+    const page = parseDoc('search/grapheme.md', `# X\n\nmatch ${'a'.repeat(171)}👩‍💻 tail`);
+
+    expect(searchDoc(page, 'match')?.excerpt).toBe(`X match ${'a'.repeat(171)}…`);
+  });
+
+  it('keeps a grapheme cluster intact when truncating a summary', () => {
+    const page = parseDoc('search/summary.md', `${'a'.repeat(159)}👩‍💻 tail`);
+
+    expect(page.summary).toBe(`${'a'.repeat(159)}…`);
+  });
+
   it('maps a match after NFKC-expanded ligatures back to the source excerpt', () => {
     const page = parseDoc('search/ligature.md', `# X\n\n${'ﬁ'.repeat(100)} needle tail`);
 
@@ -167,6 +179,12 @@ describe('parseDoc', () => {
     );
 
     expect(searchDoc(page, 'needle')?.excerpt).toContain('needle');
+  });
+
+  it('maps a match that follows many expanded and composed characters', () => {
+    const page = parseDoc('search/long-mixed.md', `# X\n\n${'İ ﬁ ㄱㅏ '.repeat(300)}needle tail`);
+
+    expect(searchDoc(page, 'needle')?.excerpt).toBe(`…${'ㄱㅏ İ ﬁ '.repeat(8)}ㄱㅏ needle tail`);
   });
 
   it('truncates a query longer than the excerpt window from the match start', () => {
