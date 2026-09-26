@@ -43,6 +43,7 @@ const SKIP = new Set([
 ]);
 
 const TREE_KEY = 'tree';
+const MIRROR_TIMEOUT_MS = 5_000;
 const SHA = /^[0-9a-f]{40}$/;
 const SEARCH_CONCURRENCY = 6;
 const SEARCH_RESULT_LIMIT = 20;
@@ -240,6 +241,15 @@ function assertBranchRef(value: string): void {
   }
 }
 
+function mirrorBase(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  const url = URL.canParse(value) ? new URL(value) : undefined;
+  if (!url || !['https:', 'http:'].includes(url.protocol) || url.search || url.hash) {
+    throw new TypeError('mirror must be an http(s) URL without a query or fragment');
+  }
+  return url.href.replace(/\/+$/, '');
+}
+
 function cacheTtl(value: number | undefined, fallback: number, name: string): number {
   const ttl = value ?? fallback;
   if (!Number.isFinite(ttl) || ttl < 0) {
@@ -345,6 +355,7 @@ export function createDocsClient(options: DocsClientOptions = {}): DocsClient {
   const apiRepoUrl = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
   const rawRepoUrl = `https://raw.githubusercontent.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
   const encodedBranch = encodeURIComponent(branch);
+  const mirror = mirrorBase(options.mirror);
   const dirTtlMs = cacheTtl(options.cacheTtlMs?.dir, DEFAULTS.dirTtlMs, 'cacheTtlMs.dir');
   const fileTtlMs = cacheTtl(options.cacheTtlMs?.file, DEFAULTS.fileTtlMs, 'cacheTtlMs.file');
 
@@ -393,6 +404,7 @@ export function createDocsClient(options: DocsClientOptions = {}): DocsClient {
     url: string,
     timeoutMs: number,
     consume: (response: Response) => Promise<T>,
+    requestHeaders = headers(),
   ): Promise<T> {
     const ctrl = new AbortController();
     const timer = setTimeout(() => {
@@ -400,13 +412,44 @@ export function createDocsClient(options: DocsClientOptions = {}): DocsClient {
     }, timeoutMs);
     let response: Response | undefined;
     try {
-      response = await fetch(url, { signal: ctrl.signal, headers: headers() });
+      response = await fetch(url, { signal: ctrl.signal, headers: requestHeaders });
       return await consume(response);
     } finally {
       clearTimeout(timer);
       // Not awaited: a custom transport's cancel may never settle.
       cancelUnusedResponseBody(response);
     }
+  }
+
+  async function fromMirror<T>(
+    base: string,
+    path: string,
+    read: (response: Response) => Promise<T | undefined>,
+  ): Promise<T | undefined> {
+    try {
+      return await withResponse(
+        `${base}/${path}`,
+        MIRROR_TIMEOUT_MS,
+        async (response) => (response.ok ? await read(response) : undefined),
+        {},
+      );
+    } catch {
+      return undefined;
+    }
+  }
+
+  function keepTree(items: DocItem[], generation: number): DocItem[] {
+    if (generation === cacheGeneration) {
+      treeCache.set(TREE_KEY, copyItems(items));
+      if (store) storeWrite(TREE_KEY, JSON.stringify(items));
+    }
+    return items;
+  }
+
+  async function keepFile(path: string, content: string, generation: number): Promise<string> {
+    if (generation === cacheGeneration) fileCache.set(path, content);
+    if (store) storeWrite(`blob-${await blobSha(content)}`, content);
+    return content;
   }
 
   function recoverFailure<T>(
@@ -472,6 +515,13 @@ export function createDocsClient(options: DocsClientOptions = {}): DocsClient {
 
   async function loadAll(generation: number): Promise<DocItem[]> {
     const key = TREE_KEY;
+    if (mirror !== undefined) {
+      const mirrored = await fromMirror(mirror, 'index.json', async (response) => {
+        const data = parseTreeResponse(await response.json());
+        return data.truncated ? undefined : filterTree(data.tree);
+      });
+      if (mirrored) return keepTree(mirrored, generation);
+    }
     const url = `${apiRepoUrl}/git/trees/${encodedBranch}?recursive=1`;
     try {
       return await withResponse(url, 20_000, async (response) => {
@@ -490,12 +540,7 @@ export function createDocsClient(options: DocsClientOptions = {}): DocsClient {
             'GitHub truncated the repository tree (too many files) -- results would be incomplete',
           );
         }
-        const items = filterTree(data.tree);
-        if (generation === cacheGeneration) {
-          treeCache.set(key, copyItems(items));
-          if (store) storeWrite(key, JSON.stringify(items));
-        }
-        return items;
+        return keepTree(filterTree(data.tree), generation);
       });
     } catch (error) {
       if (error instanceof DocsFetchError) throw error;
@@ -531,6 +576,12 @@ export function createDocsClient(options: DocsClientOptions = {}): DocsClient {
       if (generation === cacheGeneration) fileCache.set(path, stored);
       return stored;
     }
+    if (mirror !== undefined) {
+      const mirrored = await fromMirror(mirror, `raw/${encodePath(path)}`, (response) =>
+        response.text(),
+      );
+      if (mirrored !== undefined) return keepFile(path, mirrored, generation);
+    }
     const url = `${rawRepoUrl}/${encodedBranch}/${encodePath(path)}`;
     try {
       return await withResponse(url, 15_000, async (response) => {
@@ -539,10 +590,7 @@ export function createDocsClient(options: DocsClientOptions = {}): DocsClient {
           if (stale !== undefined && (await isTransientResponse(response))) return stale;
           throw new DocsFetchError(path, response.status, `HTTP ${String(response.status)}`);
         }
-        const content = await response.text();
-        if (generation === cacheGeneration) fileCache.set(path, content);
-        if (store) storeWrite(`blob-${await blobSha(content)}`, content);
-        return content;
+        return keepFile(path, await response.text(), generation);
       });
     } catch (error) {
       if (error instanceof DocsFetchError) throw error;

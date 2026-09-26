@@ -1047,3 +1047,146 @@ describe('search', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });
+
+describe('mirror', () => {
+  const mirror = 'https://docs.example.org/docs-api/';
+  const guideSha = 'b5aaad7d6dda27ea24335cdd4722c8129113f4cd';
+  const mirrorTree = {
+    truncated: false,
+    tree: [
+      { path: 'repair/guide.md', type: 'blob', sha: guideSha },
+      { path: 'README.md', type: 'blob', sha: guideSha },
+    ],
+  };
+
+  function routes(handlers: {
+    mirror: (url: string) => unknown;
+    github?: (url: string) => unknown;
+  }) {
+    const fetchMock = vi.fn().mockImplementation(async (url: string) => {
+      if (url.startsWith('https://docs.example.org/')) return handlers.mirror(url);
+      if (!handlers.github) throw new TypeError('GitHub is unreachable');
+      return handlers.github(url);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    return fetchMock;
+  }
+
+  function memoryStore() {
+    const map = new Map<string, string>();
+    return {
+      map,
+      read: (key: string) => map.get(key),
+      write: (key: string, value: string) => {
+        map.set(key, value);
+      },
+    };
+  }
+
+  it('lists and reads from the mirror first without sending the GitHub token', async () => {
+    const fetchMock = routes({
+      mirror: (url) =>
+        url.endsWith('/index.json')
+          ? { ok: true, json: async () => mirrorTree }
+          : { ok: true, text: async () => '# Guide' },
+    });
+    const client = createDocsClient({ mirror, token: 'secret' });
+
+    await expect(client.listAll()).resolves.toEqual([
+      { name: 'guide.md', path: 'repair/guide.md', type: 'file', sha: guideSha },
+    ]);
+    await expect(client.getFile('repair/guide.md')).resolves.toBe('# Guide');
+    expect(fetchMock.mock.calls).toEqual([
+      ['https://docs.example.org/docs-api/index.json', expect.objectContaining({ headers: {} })],
+      [
+        'https://docs.example.org/docs-api/raw/repair/guide.md',
+        expect.objectContaining({ headers: {} }),
+      ],
+    ]);
+  });
+
+  it('falls back to GitHub when the mirror fails', async () => {
+    const fetchMock = routes({
+      mirror: () => ({ ok: false, status: 503 }),
+      github: (url) =>
+        url.includes('/git/trees/')
+          ? { ok: true, json: async () => mockTree }
+          : { ok: true, text: async () => '# From GitHub' },
+    });
+    const client = createDocsClient({ mirror });
+
+    await expect(client.listAll()).resolves.toHaveLength(3);
+    await expect(client.getFile('intro.md')).resolves.toBe('# From GitHub');
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  it.each([
+    ['a malformed index', { message: 'not a tree' }],
+    ['a truncated index', { ...mirrorTree, truncated: true }],
+  ])('falls back to GitHub on %s', async (_label, index) => {
+    routes({
+      mirror: () => ({ ok: true, json: async () => index }),
+      github: () => ({ ok: true, json: async () => mockTree }),
+    });
+    await expect(createDocsClient({ mirror }).listAll()).resolves.toHaveLength(3);
+  });
+
+  it('keeps the GitHub error when both sources fail', async () => {
+    routes({
+      mirror: () => {
+        throw new TypeError('fetch failed');
+      },
+      github: () => ({ ok: false, status: 404 }),
+    });
+    await expect(createDocsClient({ mirror }).getFile('missing.md')).rejects.toMatchObject({
+      name: 'DocsFetchError',
+      status: 404,
+    });
+  });
+
+  it('stores mirror content under its verified blob sha', async () => {
+    const fetchMock = routes({
+      mirror: (url) =>
+        url.endsWith('/index.json')
+          ? { ok: true, json: async () => mirrorTree }
+          : { ok: true, text: async () => '# Guide' },
+    });
+    const store = memoryStore();
+    await createDocsClient({ mirror, store }).listAll();
+    await createDocsClient({ mirror, store }).getFile('repair/guide.md');
+    expect(store.map.get(`blob-${guideSha}`)).toBe('# Guide');
+
+    fetchMock.mockClear();
+    await expect(createDocsClient({ mirror, store }).getFile('repair/guide.md')).resolves.toBe(
+      '# Guide',
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('gives up on a slow mirror after five seconds', async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchMock = vi.fn().mockImplementation((url: string, init: RequestInit) => {
+        if (url.includes('/git/trees/'))
+          return Promise.resolve({ ok: true, json: async () => mockTree });
+        return new Promise((_resolve, reject) => {
+          init.signal?.addEventListener('abort', () => {
+            reject(new DOMException('aborted', 'AbortError'));
+          });
+        });
+      });
+      vi.stubGlobal('fetch', fetchMock);
+      const request = createDocsClient({ mirror }).listAll();
+      await vi.advanceTimersByTimeAsync(5_000);
+      await expect(request).resolves.toHaveLength(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('rejects a mirror that is not a plain http(s) URL', () => {
+    for (const value of ['docs.example.org', 'ftp://docs.example.org', `${mirror}?v=1`]) {
+      expect(() => createDocsClient({ mirror: value })).toThrow(TypeError);
+    }
+  });
+});
