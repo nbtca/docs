@@ -42,6 +42,8 @@ const SKIP = new Set([
   'docs',
 ]);
 
+const TREE_KEY = 'tree';
+const SHA = /^[0-9a-f]{40}$/;
 const SEARCH_CONCURRENCY = 6;
 const SEARCH_RESULT_LIMIT = 20;
 
@@ -57,6 +59,7 @@ function filterAndSort(raw: GitHubItem[]): DocItem[] {
       name: item.name,
       path: item.path,
       type: item.type === 'dir' ? 'dir' : 'file',
+      ...shaOf(item),
     }))
     .sort((a, b) => {
       if (a.type !== b.type) return a.type === 'dir' ? -1 : 1;
@@ -75,8 +78,43 @@ function filterTree(items: GitHubTreeItem[]): DocItem[] {
       name: item.path.slice(item.path.lastIndexOf('/') + 1),
       path: item.path,
       type: 'file' as const,
+      ...shaOf(item),
     }))
     .sort((a, b) => a.path.localeCompare(b.path));
+}
+
+function shaOf(item: { sha?: unknown }): { sha?: string } {
+  return typeof item.sha === 'string' && SHA.test(item.sha) ? { sha: item.sha } : {};
+}
+
+async function blobSha(content: string): Promise<string> {
+  const body = new TextEncoder().encode(content);
+  const header = new TextEncoder().encode(`blob ${String(body.length)}\0`);
+  const object = new Uint8Array(header.length + body.length);
+  object.set(header);
+  object.set(body, header.length);
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-1', object));
+  return Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+function isDocItem(value: unknown): value is DocItem {
+  return (
+    isRecord(value) &&
+    typeof value.name === 'string' &&
+    typeof value.path === 'string' &&
+    (value.type === 'file' || value.type === 'dir') &&
+    (value.sha === undefined || typeof value.sha === 'string')
+  );
+}
+
+function parseStoredTree(value: string | undefined): DocItem[] | undefined {
+  if (value === undefined) return undefined;
+  try {
+    const items: unknown = JSON.parse(value);
+    return Array.isArray(items) && items.every(isDocItem) ? items : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function copyItems(items: DocItem[]): DocItem[] {
@@ -132,11 +170,13 @@ interface GitHubItem {
   name: string;
   path: string;
   type: string;
+  sha?: unknown;
 }
 
 interface GitHubTreeItem {
   path: string;
   type: string;
+  sha?: unknown;
 }
 
 interface GitHubTreeResponse {
@@ -314,7 +354,32 @@ export function createDocsClient(options: DocsClientOptions = {}): DocsClient {
   const dirRequests = new Map<string, Promise<DocItem[]>>();
   const fileRequests = new Map<string, Promise<string>>();
   const treeRequests = new Map<string, Promise<DocItem[]>>();
+  const store = options.store;
+  let storedTree: DocItem[] | undefined;
   let cacheGeneration = 0;
+
+  function storeRead(key: string): string | undefined {
+    try {
+      return store?.read(key);
+    } catch {
+      return undefined;
+    }
+  }
+
+  function storeWrite(key: string, value: string): void {
+    try {
+      store?.write(key, value);
+    } catch {
+      return;
+    }
+  }
+
+  function knownTree(): DocItem[] | undefined {
+    const fetched = treeCache.getStale(TREE_KEY);
+    if (fetched) return fetched;
+    storedTree ??= parseStoredTree(storeRead(TREE_KEY));
+    return storedTree;
+  }
 
   function headers(): Record<string, string> {
     const requestHeaders: Record<string, string> = {
@@ -406,7 +471,7 @@ export function createDocsClient(options: DocsClientOptions = {}): DocsClient {
   }
 
   async function loadAll(generation: number): Promise<DocItem[]> {
-    const key = '__tree__';
+    const key = TREE_KEY;
     const url = `${apiRepoUrl}/git/trees/${encodedBranch}?recursive=1`;
     try {
       return await withResponse(url, 20_000, async (response) => {
@@ -426,7 +491,10 @@ export function createDocsClient(options: DocsClientOptions = {}): DocsClient {
           );
         }
         const items = filterTree(data.tree);
-        if (generation === cacheGeneration) treeCache.set(key, copyItems(items));
+        if (generation === cacheGeneration) {
+          treeCache.set(key, copyItems(items));
+          if (store) storeWrite(key, JSON.stringify(items));
+        }
         return items;
       });
     } catch (error) {
@@ -436,17 +504,33 @@ export function createDocsClient(options: DocsClientOptions = {}): DocsClient {
   }
 
   function listAll(): Promise<DocItem[]> {
-    const key = '__tree__';
-    const hit = treeCache.get(key);
+    const hit = treeCache.get(TREE_KEY);
     if (hit) return Promise.resolve(copyItems(hit));
-    return shareRequest(treeRequests, key, () => loadAll(cacheGeneration)).then(copyItems);
+    return shareRequest(treeRequests, TREE_KEY, () => loadAll(cacheGeneration)).then(copyItems);
+  }
+
+  function peekAll(): DocItem[] | undefined {
+    const items = knownTree();
+    return items && copyItems(items);
   }
 
   async function listSections(): Promise<DocSection[]> {
     return sectionsFromItems(await listAll());
   }
 
+  async function loadStoredFile(path: string): Promise<string | undefined> {
+    const sha = knownTree()?.find((item) => item.path === path)?.sha;
+    if (sha === undefined) return undefined;
+    const content = storeRead(`blob-${sha}`);
+    return content !== undefined && (await blobSha(content)) === sha ? content : undefined;
+  }
+
   async function loadFile(path: string, generation: number): Promise<string> {
+    const stored = store && (await loadStoredFile(path));
+    if (stored !== undefined) {
+      if (generation === cacheGeneration) fileCache.set(path, stored);
+      return stored;
+    }
     const url = `${rawRepoUrl}/${encodedBranch}/${encodePath(path)}`;
     try {
       return await withResponse(url, 15_000, async (response) => {
@@ -457,6 +541,7 @@ export function createDocsClient(options: DocsClientOptions = {}): DocsClient {
         }
         const content = await response.text();
         if (generation === cacheGeneration) fileCache.set(path, content);
+        if (store) storeWrite(`blob-${await blobSha(content)}`, content);
         return content;
       });
     } catch (error) {
@@ -521,6 +606,7 @@ export function createDocsClient(options: DocsClientOptions = {}): DocsClient {
 
   function clear(): void {
     cacheGeneration += 1;
+    storedTree = undefined;
     dirCache.clear();
     fileCache.clear();
     treeCache.clear();
@@ -529,5 +615,5 @@ export function createDocsClient(options: DocsClientOptions = {}): DocsClient {
     treeRequests.clear();
   }
 
-  return { listDir, listAll, listSections, getFile, getDocument, search, clear };
+  return { listDir, listAll, peekAll, listSections, getFile, getDocument, search, clear };
 }
