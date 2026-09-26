@@ -132,22 +132,56 @@ function transitionFence(line: string, current: MarkdownFence | undefined): Fenc
   return { delimiter: false, fence: current };
 }
 
-function isIndentedCodeLine(line: string): boolean {
-  const candidate = quoteContainer(line).rest;
-  if (/^(?: {4}|\t)/.test(candidate)) return true;
-  const list = /^ {0,3}(?:[-+*]|\d{1,9}[.)])([ \t]+)(.*)$/.exec(candidate);
-  if (!list) return false;
-  const padding = list[1] ?? '';
-  return padding.includes('\t') || padding.length >= 5 || /^(?: {4}|\t)/.test(list[2] ?? '');
+function indentWidth(line: string): number {
+  let width = 0;
+  for (const character of line) {
+    if (character === ' ') width += 1;
+    else if (character === '\t') width += 4 - (width % 4);
+    else break;
+  }
+  return width;
+}
+
+function proseLines(body: string): (string | undefined)[] {
+  let fence: MarkdownFence | undefined;
+  let afterBreak = true;
+  let inCode = false;
+  let listIndent = 0;
+  return body.split(/\r?\n/).map((line) => {
+    const transition = transitionFence(line, fence);
+    fence = transition.fence;
+    if (transition.delimiter || fence) {
+      afterBreak = true;
+      inCode = false;
+      return undefined;
+    }
+    const candidate = quoteContainer(line).rest;
+    if (candidate.trim() === '') {
+      afterBreak = true;
+      return line;
+    }
+    const width = indentWidth(candidate);
+    if (afterBreak && width < listIndent) listIndent = 0;
+    inCode = width - listIndent >= 4 && (afterBreak || inCode);
+    afterBreak = false;
+    if (inCode) return undefined;
+    const item = /^ {0,3}(?:[-+*]|\d{1,9}[.)])([ \t]+)(.*)$/.exec(candidate);
+    if (!item) return line;
+    const padding = item[1] ?? '';
+    const marker = candidate.length - (item[2] ?? '').length - padding.length;
+    if (padding.includes('\t') || padding.length >= 5 || /^(?: {4}|\t)/.test(item[2] ?? '')) {
+      listIndent = marker + 1;
+      inCode = true;
+      return undefined;
+    }
+    listIndent = marker + padding.length;
+    return line;
+  });
 }
 
 function extractTitle(body: string): string | undefined {
-  let fence: MarkdownFence | undefined;
-  for (const line of body.split(/\r?\n/)) {
-    const transition = transitionFence(line, fence);
-    fence = transition.fence;
-    if (transition.delimiter || fence) continue;
-    if (isIndentedCodeLine(line)) continue;
+  for (const line of proseLines(body)) {
+    if (line === undefined) continue;
     const match = /^#\s+(.+?)\s*$/.exec(line);
     if (match?.[1]) return cleanInline(match[1].replace(/\s+#+\s*$/, ''));
   }
@@ -164,7 +198,6 @@ function truncate(value: string, length: number): string {
 function extractSummary(body: string): string {
   const paragraphs: string[] = [];
   let current: string[] = [];
-  let fence: MarkdownFence | undefined;
   let inContainer = false;
   let inTag = false;
   let hiddenTag: 'script' | 'style' | undefined;
@@ -174,14 +207,8 @@ function extractSummary(body: string): string {
     current = [];
   };
 
-  for (const rawLine of body.split(/\r?\n/)) {
-    const transition = transitionFence(rawLine, fence);
-    fence = transition.fence;
-    if (transition.delimiter || fence) {
-      finishParagraph();
-      continue;
-    }
-    if (isIndentedCodeLine(rawLine)) {
+  for (const rawLine of proseLines(body)) {
+    if (rawLine === undefined) {
       finishParagraph();
       continue;
     }
@@ -251,14 +278,10 @@ function parseAttributes(source: string): Readonly<Record<string, string | true>
 }
 
 function componentSource(body: string): string {
-  const lines: string[] = [];
-  let fence: MarkdownFence | undefined;
-  for (const line of body.split(/\r?\n/)) {
-    const transition = transitionFence(line, fence);
-    fence = transition.fence;
-    if (!transition.delimiter && !fence && !isIndentedCodeLine(line)) lines.push(line);
-  }
-  return lines.join('\n').replace(/<!--[\s\S]*?-->/g, ' ');
+  return proseLines(body)
+    .filter((line) => line !== undefined)
+    .join('\n')
+    .replace(/<!--[\s\S]*?-->/g, ' ');
 }
 
 function extractComponents(body: string): DocComponent[] {
