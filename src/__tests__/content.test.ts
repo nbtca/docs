@@ -142,6 +142,12 @@ describe('parseDoc', () => {
     expect(searchDoc(page, 'needle')?.excerpt).toContain('😀…');
   });
 
+  it('keeps a grapheme cluster intact at the end of a search excerpt', () => {
+    const page = parseDoc('search/grapheme.md', `# X\n\nmatch ${'a'.repeat(171)}👩‍💻 tail`);
+
+    expect(searchDoc(page, 'match')?.excerpt).toBe(`X match ${'a'.repeat(171)}…`);
+  });
+
   it('maps a match after NFKC-expanded ligatures back to the source excerpt', () => {
     const page = parseDoc('search/ligature.md', `# X\n\n${'ﬁ'.repeat(100)} needle tail`);
 

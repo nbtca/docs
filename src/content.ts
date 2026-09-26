@@ -488,15 +488,17 @@ function excerpt(text: string, query: string, terms: string[]): string {
   }
   const start = indexed.boundaries[startGrapheme] ?? 0;
   const prefix = start > 0 ? '…' : '';
-  const characters: string[] = [];
-  for (const character of text.slice(start)) {
-    if (characters.length >= EXCERPT_LENGTH) break;
-    characters.push(character);
+  let endGrapheme = startGrapheme;
+  let selectedCodePoints = 0;
+  while (endGrapheme < indexed.codePoints.length) {
+    const length = indexed.codePoints[endGrapheme] ?? 0;
+    if (endGrapheme > startGrapheme && selectedCodePoints + length > EXCERPT_LENGTH) break;
+    selectedCodePoints += length;
+    endGrapheme += 1;
   }
-  const selected = characters.join('');
-  const value = selected.trim();
-  const suffix = start + selected.length < text.length ? '…' : '';
-  return `${prefix}${value}${suffix}`;
+  const end = indexed.boundaries[endGrapheme] ?? text.length;
+  const suffix = end < text.length ? '…' : '';
+  return `${prefix}${text.slice(start, end).trim()}${suffix}`;
 }
 
 export function searchDoc(page: DocPage, query: string): DocsSearchResult | null {
