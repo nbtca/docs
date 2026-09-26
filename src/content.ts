@@ -3,6 +3,7 @@ import type { DocComponent, DocPage, DocsSearchResult } from './types.js';
 const SUMMARY_LENGTH = 160;
 const EXCERPT_LENGTH = 180;
 const GRAPHEME_SEGMENTER = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+const LIST_ITEM = /^( {0,3}(?:[-+*]|\d{1,9}[.)]))([ \t]+)/;
 const NORMALIZATION_CHUNK = 512;
 // NFKC never joins these characters to what precedes them, so chunks split before them.
 const NORMALIZATION_BOUNDARY = /[ -~\u4e00-\u9fff]/g;
@@ -109,8 +110,7 @@ function transitionFence(line: string, current: MarkdownFence | undefined): Fenc
       candidate = candidate.slice(Math.min(indentation, current.listIndent));
     }
   } else {
-    const listPrefix = /^ {0,3}(?:(?:[-+*]|\d{1,9}[.)]))[ \t]+/.exec(candidate)?.[0] ?? '';
-    listIndent = listPrefix.length;
+    listIndent = LIST_ITEM.exec(candidate)?.[0].length ?? 0;
     candidate = candidate.slice(listIndent);
   }
   const match = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(candidate);
@@ -168,11 +168,12 @@ function proseLines(body: string): (string | undefined)[] {
     inCode = width - listIndent >= 4 && (afterBreak || inCode);
     afterBreak = false;
     if (inCode) return undefined;
-    const item = /^ {0,3}(?:[-+*]|\d{1,9}[.)])([ \t]+)(.*)$/.exec(candidate);
+    const item = LIST_ITEM.exec(candidate);
     if (!item) return line;
-    const padding = item[1] ?? '';
-    const marker = candidate.length - (item[2] ?? '').length - padding.length;
-    if (padding.includes('\t') || padding.length >= 5 || /^(?: {4}|\t)/.test(item[2] ?? '')) {
+    const marker = item[1]?.length ?? 0;
+    const padding = item[2] ?? '';
+    const rest = candidate.slice(item[0].length);
+    if (padding.includes('\t') || padding.length >= 5 || /^(?: {4}|\t)/.test(rest)) {
       listIndent = marker + 1;
       inCode = true;
       return undefined;
