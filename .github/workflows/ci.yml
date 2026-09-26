@@ -79,7 +79,7 @@ jobs:
         env:
           NBTCA_DOCS_TARBALL: ${{ steps.docs-package.outputs.tarball }}
         run: |
-          npm install --ignore-scripts --no-save --package-lock=false "$NBTCA_DOCS_TARBALL"
+          npm install --ignore-scripts --no-save "$NBTCA_DOCS_TARBALL"
           npm run typecheck
           npx vitest run --root src
           npm run test:cli
