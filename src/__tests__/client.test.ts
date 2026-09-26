@@ -776,6 +776,100 @@ describe('listAll', () => {
   });
 });
 
+describe('persistent store', () => {
+  const guideSha = 'b5aaad7d6dda27ea24335cdd4722c8129113f4cd';
+  const changedSha = 'b125dfa2b24f5e3865648e4e3ca989bf0804bed1';
+  const tree = (sha: string) => ({
+    truncated: false,
+    tree: [{ path: 'repair/guide.md', type: 'blob', sha }],
+  });
+
+  function memoryStore(entries: Record<string, string> = {}) {
+    const map = new Map(Object.entries(entries));
+    return {
+      map,
+      read: (key: string) => map.get(key),
+      write: (key: string, value: string) => {
+        map.set(key, value);
+      },
+    };
+  }
+
+  it('exposes blob shas and persists the tree', async () => {
+    mockFetch({ ok: true, json: async () => tree(guideSha) });
+    const store = memoryStore();
+    const items = await createDocsClient({ store }).listAll();
+    expect(items).toEqual([
+      { name: 'guide.md', path: 'repair/guide.md', type: 'file', sha: guideSha },
+    ]);
+    expect(createDocsClient({ store }).peekAll()).toEqual(items);
+  });
+
+  it('drops shas that are not Git object ids', async () => {
+    mockFetch({ ok: true, json: async () => tree('../escape') });
+    const [item] = await createDocsClient().listAll();
+    expect(item).not.toHaveProperty('sha');
+  });
+
+  it('peeks nothing without a stored or fetched tree', () => {
+    expect(createDocsClient().peekAll()).toBeUndefined();
+    expect(createDocsClient({ store: memoryStore() }).peekAll()).toBeUndefined();
+  });
+
+  it('serves a stored blob matching the known sha without fetching', async () => {
+    const spy = vi.fn().mockRejectedValue(new TypeError('fetch failed'));
+    vi.stubGlobal('fetch', spy);
+    const store = memoryStore({
+      tree: JSON.stringify([
+        { name: 'guide.md', path: 'repair/guide.md', type: 'file', sha: guideSha },
+      ]),
+      [`blob-${guideSha}`]: '# Guide',
+    });
+    await expect(createDocsClient({ store }).getFile('repair/guide.md')).resolves.toBe('# Guide');
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('refetches a changed file and stores it under its own sha', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValueOnce({ ok: true, json: async () => tree(changedSha) })
+        .mockResolvedValueOnce({ ok: true, text: async () => '# Guide v2' }),
+    );
+    const store = memoryStore({ [`blob-${guideSha}`]: '# Guide' });
+    const client = createDocsClient({ store });
+    await client.listAll();
+    await expect(client.getFile('repair/guide.md')).resolves.toBe('# Guide v2');
+    expect(store.map.get(`blob-${changedSha}`)).toBe('# Guide v2');
+  });
+
+  it('ignores corrupt entries and failing stores', async () => {
+    mockFetch({ ok: true, text: async () => '# Guide' });
+    const corrupt = memoryStore({
+      tree: JSON.stringify([
+        { name: 'guide.md', path: 'repair/guide.md', type: 'file', sha: guideSha },
+      ]),
+      [`blob-${guideSha}`]: '# Gui',
+    });
+    await expect(createDocsClient({ store: corrupt }).getFile('repair/guide.md')).resolves.toBe(
+      '# Guide',
+    );
+    expect(createDocsClient({ store: memoryStore({ tree: '{' }) }).peekAll()).toBeUndefined();
+    const failing = {
+      read: () => {
+        throw new Error('EACCES');
+      },
+      write: () => {
+        throw new Error('ENOSPC');
+      },
+    };
+    await expect(createDocsClient({ store: failing }).getFile('repair/guide.md')).resolves.toBe(
+      '# Guide',
+    );
+  });
+});
+
 describe('document discovery', () => {
   it('groups documents by top-level section and identifies section indexes', async () => {
     mockFetch({

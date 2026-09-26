@@ -9,5 +9,6 @@ export type {
   DocsClientOptions,
   DocsSearchOptions,
   DocsSearchResult,
+  DocsStore,
 } from './types.js';
 export { DocsFetchError } from './types.js';

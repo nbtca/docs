@@ -2,6 +2,7 @@ export interface DocItem {
   name: string;
   path: string;
   type: 'file' | 'dir';
+  sha?: string;
 }
 
 export interface DocComponent {
@@ -42,6 +43,11 @@ export interface DocsSearchResult {
   title: string;
 }
 
+export interface DocsStore {
+  read(key: string): string | undefined;
+  write(key: string, value: string): void;
+}
+
 export interface DocsClientOptions {
   owner?: string;
   repo?: string;
@@ -51,11 +57,13 @@ export interface DocsClientOptions {
     dir?: number;
     file?: number;
   };
+  store?: DocsStore;
 }
 
 export interface DocsClient {
   listDir(path?: string): Promise<DocItem[]>;
   listAll(): Promise<DocItem[]>;
+  peekAll(): DocItem[] | undefined;
   listSections(): Promise<DocSection[]>;
   getFile(path: string): Promise<string>;
   getDocument(path: string): Promise<DocPage>;

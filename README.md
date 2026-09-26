@@ -36,6 +36,7 @@ const matches = await docs.search('repair', { pathPrefix: 'repair' });
 | `token`           | `GITHUB_TOKEN` or `GH_TOKEN` | GitHub token                 |
 | `cacheTtlMs.dir`  | `300000`                     | Directory and tree cache TTL |
 | `cacheTtlMs.file` | `600000`                     | File cache TTL               |
+| `store`           | none                         | Persistent cache, see below  |
 
 ### `docs.listDir(path?)`
 
@@ -48,7 +49,12 @@ Returns raw file content.
 
 ### `docs.listAll()`
 
-Lists every Markdown file through GitHub's recursive tree API.
+Lists every Markdown file through GitHub's recursive tree API. Each item carries its Git blob `sha`.
+
+### `docs.peekAll()`
+
+Returns the last known tree without a request: the one fetched in this process, else the one in
+`store`, else `undefined`.
 
 ### `docs.listSections()`
 
@@ -59,6 +65,13 @@ Returns top-level content sections with document counts and optional index paths
 Returns content with its route, section, title, summary, and semantic component attributes. Component
 metadata covers `PageHero`, `FactStrip`, `LinkCard`, `Split`, `TimelineEntry`, and `Figure` without
 imposing a renderer.
+
+### `store`
+
+An object with `read(key): string | undefined` and `write(key, value): void`. The client keeps the
+tree under `tree` and file content under `blob-<sha>`, where `<sha>` is the Git blob id. `getFile`
+serves stored content only when its hash matches the blob id in the last known tree, so a changed
+file is always refetched. Store errors and corrupt entries are ignored; eviction is up to the store.
 
 ### `docs.search(query, options?)`
 
