@@ -43,7 +43,9 @@ const SKIP = new Set([
 ]);
 
 const TREE_KEY = 'tree';
+const BUNDLE_KEY = 'bundle';
 const MIRROR_TIMEOUT_MS = 5_000;
+const BUNDLE_TIMEOUT_MS = 30_000;
 const SHA = /^[0-9a-f]{40}$/;
 const SEARCH_CONCURRENCY = 6;
 const SEARCH_RESULT_LIMIT = 20;
@@ -183,6 +185,12 @@ interface GitHubTreeItem {
 interface GitHubTreeResponse {
   tree: GitHubTreeItem[];
   truncated: boolean;
+}
+
+interface BundleFile {
+  path: string;
+  sha: string;
+  content: string;
 }
 
 function encodePath(path: string): string {
@@ -340,6 +348,22 @@ function parseTreeResponse(value: unknown): GitHubTreeResponse {
   return { tree: value.tree, truncated: value.truncated };
 }
 
+function isBundleFile(value: unknown): value is BundleFile {
+  return (
+    isRecord(value) &&
+    typeof value.path === 'string' &&
+    typeof value.sha === 'string' &&
+    typeof value.content === 'string'
+  );
+}
+
+function parseBundle(value: unknown): BundleFile[] {
+  if (!isRecord(value) || !Array.isArray(value.files) || !value.files.every(isBundleFile)) {
+    throw new TypeError('Invalid mirror bundle');
+  }
+  return value.files;
+}
+
 export function createDocsClient(options: DocsClientOptions = {}): DocsClient {
   const owner = options.owner ?? DEFAULTS.owner;
   const repo = options.repo ?? DEFAULTS.repo;
@@ -361,11 +385,12 @@ export function createDocsClient(options: DocsClientOptions = {}): DocsClient {
   const fileTtlMs = cacheTtl(options.cacheTtlMs?.file, DEFAULTS.fileTtlMs, 'cacheTtlMs.file');
 
   const dirCache = new TtlCache<DocItem[]>(dirTtlMs, 30);
-  const fileCache = new TtlCache<string>(fileTtlMs, 200);
+  const fileCache = new TtlCache<string>(fileTtlMs, 1000);
   const treeCache = new TtlCache<DocItem[]>(dirTtlMs, 1);
   const dirRequests = new Map<string, Promise<DocItem[]>>();
   const fileRequests = new Map<string, Promise<string>>();
   const treeRequests = new Map<string, Promise<DocItem[]>>();
+  const bundleRequests = new Map<string, Promise<number>>();
   const store = options.store;
   let storedTree: DocItem[] | undefined;
   let cacheGeneration = 0;
@@ -426,20 +451,22 @@ export function createDocsClient(options: DocsClientOptions = {}): DocsClient {
     base: string,
     path: string,
     read: (response: Response) => Promise<T | undefined>,
+    timeoutMs = MIRROR_TIMEOUT_MS,
+    tripsBreaker = true,
   ): Promise<T | undefined> {
     if (mirrorFailed) return undefined;
     try {
       return await withResponse(
         `${base}/${path}`,
-        MIRROR_TIMEOUT_MS,
+        timeoutMs,
         async (response) => {
-          if (response.status >= 500) mirrorFailed = true;
+          if (response.status >= 500 && tripsBreaker) mirrorFailed = true;
           return response.ok ? await read(response) : undefined;
         },
         {},
       );
     } catch {
-      mirrorFailed = true;
+      if (tripsBreaker) mirrorFailed = true;
       return undefined;
     }
   }
@@ -452,9 +479,14 @@ export function createDocsClient(options: DocsClientOptions = {}): DocsClient {
     return items;
   }
 
-  async function keepFile(path: string, content: string, generation: number): Promise<string> {
+  async function keepFile(
+    path: string,
+    content: string,
+    generation: number,
+    sha?: string,
+  ): Promise<string> {
     if (generation === cacheGeneration) fileCache.set(path, content);
-    if (store) storeWrite(`blob-${await blobSha(content)}`, content);
+    if (store) storeWrite(`blob-${sha ?? (await blobSha(content))}`, content);
     return content;
   }
 
@@ -615,6 +647,37 @@ export function createDocsClient(options: DocsClientOptions = {}): DocsClient {
     return shareRequest(fileRequests, path, () => loadFile(path, cacheGeneration));
   }
 
+  async function loadBundle(base: string, generation: number): Promise<number> {
+    const shas = new Map((await listAll()).map((item) => [item.path, item.sha]));
+    // The bundle is optional: losing it must not stop per-file mirror reads.
+    const files = await fromMirror(
+      base,
+      'bundle.json',
+      async (response) => parseBundle(await response.json()),
+      BUNDLE_TIMEOUT_MS,
+      false,
+    );
+    let loaded = 0;
+    for (const file of files ?? []) {
+      if (file.sha !== shas.get(file.path) || (await blobSha(file.content)) !== file.sha) continue;
+      await keepFile(file.path, file.content, generation, file.sha);
+      loaded += 1;
+    }
+    return loaded;
+  }
+
+  function prefetch(): Promise<number> {
+    if (mirror === undefined) return Promise.resolve(0);
+    return shareRequest(bundleRequests, BUNDLE_KEY, () => loadBundle(mirror, cacheGeneration));
+  }
+
+  function isUncached(item: DocItem): boolean {
+    return (
+      fileCache.get(item.path) === undefined &&
+      (item.sha === undefined || storeRead(`blob-${item.sha}`) === undefined)
+    );
+  }
+
   async function getDocument(path: string): Promise<DocPage> {
     if (!path.toLowerCase().endsWith('.md')) {
       throw new TypeError('path must point to a Markdown document');
@@ -636,6 +699,9 @@ export function createDocsClient(options: DocsClientOptions = {}): DocsClient {
     const candidates = pathPrefix
       ? all.filter((item) => item.path.startsWith(`${pathPrefix}/`))
       : all;
+    if (mirror !== undefined && candidates.filter(isUncached).length > SEARCH_CONCURRENCY) {
+      await prefetch();
+    }
     let loaded = 0;
     let firstFailure: DocsFetchError | undefined;
     const matches = await mapConcurrent(candidates, SEARCH_CONCURRENCY, async (item) => {
@@ -667,7 +733,19 @@ export function createDocsClient(options: DocsClientOptions = {}): DocsClient {
     dirRequests.clear();
     fileRequests.clear();
     treeRequests.clear();
+    bundleRequests.clear();
+    mirrorFailed = false;
   }
 
-  return { listDir, listAll, peekAll, listSections, getFile, getDocument, search, clear };
+  return {
+    listDir,
+    listAll,
+    peekAll,
+    listSections,
+    getFile,
+    getDocument,
+    prefetch,
+    search,
+    clear,
+  };
 }

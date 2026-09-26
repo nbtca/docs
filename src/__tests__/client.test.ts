@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createDocsClient } from '../client.js';
 import { DocsFetchError } from '../types.js';
@@ -1205,6 +1206,124 @@ describe('mirror', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  describe('prefetch', () => {
+    const bundleOf = (files: { path: string; sha: string; content: string }[]) => ({
+      ok: true,
+      json: async () => ({ files }),
+    });
+
+    function mirrorWith(bundle: unknown) {
+      return routes({
+        mirror: (url) =>
+          url.endsWith('/index.json') ? { ok: true, json: async () => mirrorTree } : bundle,
+      });
+    }
+
+    it('loads every verified file from the bundle in one request', async () => {
+      const fetchMock = mirrorWith(
+        bundleOf([{ path: 'repair/guide.md', sha: guideSha, content: '# Guide' }]),
+      );
+      const store = memoryStore();
+      const client = createDocsClient({ mirror, store });
+
+      await expect(client.prefetch()).resolves.toBe(1);
+      await expect(client.getFile('repair/guide.md')).resolves.toBe('# Guide');
+      expect(store.map.get(`blob-${guideSha}`)).toBe('# Guide');
+      expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual([
+        'https://docs.example.org/docs-api/index.json',
+        'https://docs.example.org/docs-api/bundle.json',
+      ]);
+    });
+
+    it('rejects files whose content or sha does not match the tree', async () => {
+      const staleSha = '0'.repeat(40);
+      mirrorWith(
+        bundleOf([
+          { path: 'repair/guide.md', sha: guideSha, content: '# Tampered' },
+          { path: 'repair/guide.md', sha: staleSha, content: '# Stale' },
+          { path: 'other.md', sha: guideSha, content: '# Guide' },
+        ]),
+      );
+      const store = memoryStore();
+
+      await expect(createDocsClient({ mirror, store }).prefetch()).resolves.toBe(0);
+      expect([...store.map.keys()]).toEqual(['tree']);
+    });
+
+    it.each([
+      ['a malformed bundle', { ok: true, json: async () => ({ files: [{ path: 1 }] }) }],
+      ['a missing bundle', { ok: false, status: 404 }],
+      ['a failing mirror', { ok: false, status: 503 }],
+    ])('loads nothing from %s', async (_label, bundle) => {
+      mirrorWith(bundle);
+      await expect(createDocsClient({ mirror }).prefetch()).resolves.toBe(0);
+    });
+
+    it('keeps reading single files from the mirror when the bundle fails', async () => {
+      const fetchMock = routes({
+        mirror: (url) =>
+          url.endsWith('/index.json')
+            ? { ok: true, json: async () => mirrorTree }
+            : url.endsWith('/bundle.json')
+              ? { ok: false, status: 503 }
+              : { ok: true, text: async () => '# From mirror' },
+      });
+      const client = createDocsClient({ mirror });
+
+      await expect(client.prefetch()).resolves.toBe(0);
+      await expect(client.getFile('repair/guide.md')).resolves.toBe('# From mirror');
+      expect(String(fetchMock.mock.calls.at(-1)?.[0])).toContain('docs.example.org');
+    });
+
+    it('asks the mirror again after clear()', async () => {
+      let mirrorUp = false;
+      const fetchMock = routes({
+        mirror: () =>
+          mirrorUp ? { ok: true, json: async () => mirrorTree } : { ok: false, status: 503 },
+        github: () => ({ ok: true, json: async () => mockTree }),
+      });
+      const client = createDocsClient({ mirror });
+
+      await client.listAll();
+      mirrorUp = true;
+      client.clear();
+      await client.listAll();
+      expect(String(fetchMock.mock.calls.at(-1)?.[0])).toContain('docs.example.org');
+    });
+
+    it('does nothing without a mirror', async () => {
+      const fetchMock = vi.fn();
+      vi.stubGlobal('fetch', fetchMock);
+      await expect(createDocsClient().prefetch()).resolves.toBe(0);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('lets search read many uncached documents from the bundle', async () => {
+      const files = Array.from({ length: 8 }, (_, index) => {
+        const content = `# Repair ${String(index)}`;
+        const sha = createHash('sha1')
+          .update(`blob ${String(content.length)}\0${content}`)
+          .digest('hex');
+        return { path: `repair/${String(index)}.md`, sha, content };
+      });
+      const fetchMock = routes({
+        mirror: (url) =>
+          url.endsWith('/index.json')
+            ? {
+                ok: true,
+                json: async () => ({
+                  truncated: false,
+                  tree: files.map(({ path, sha }) => ({ path, type: 'blob', sha })),
+                }),
+              }
+            : bundleOf(files),
+      });
+
+      await expect(createDocsClient({ mirror }).search('repair')).resolves.toHaveLength(8);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
   });
 
   it('rejects a mirror that is not a plain http(s) URL', () => {

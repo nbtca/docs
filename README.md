@@ -78,13 +78,21 @@ file is always refetched. Store errors and corrupt entries are ignored; eviction
 
 A base URL tried before GitHub by `listAll` and `getFile`, such as
 `https://docs.nbtca.space/docs-api`. It serves `index.json` in the shape of GitHub's recursive tree
-response and each file at `raw/<path>`. Any mirror failure, invalid or truncated index, or wait past
+response, each file at `raw/<path>`, and optionally `bundle.json` as
+`{ files: [{ path, sha, content }] }`. Any mirror failure, invalid or truncated index, or wait past
 5 seconds falls back to GitHub. The GitHub token is never sent to the mirror.
+
+### `docs.prefetch()`
+
+Loads every document from the mirror's `bundle.json` in one request and resolves to how many were
+loaded. Only files whose content hashes to the blob id in the current tree are kept. Resolves to `0`
+without a mirror or when the bundle is unavailable.
 
 ### `docs.search(query, options?)`
 
 Searches paths, titles, summaries, Markdown text, and semantic component attributes. Results are
-ranked and include excerpts. Use `pathPrefix` to scope a search and `limit` to cap results.
+ranked and include excerpts. With a mirror, a search that would fetch many uncached documents calls
+`prefetch()` first. Use `pathPrefix` to scope a search and `limit` to cap results.
 
 ### `docs.clear()`
 

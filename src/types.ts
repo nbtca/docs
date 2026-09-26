@@ -68,6 +68,7 @@ export interface DocsClient {
   listSections(): Promise<DocSection[]>;
   getFile(path: string): Promise<string>;
   getDocument(path: string): Promise<DocPage>;
+  prefetch(): Promise<number>;
   search(query: string, options?: DocsSearchOptions): Promise<DocsSearchResult[]>;
   clear(): void;
 }
