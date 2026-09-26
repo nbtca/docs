@@ -3,6 +3,9 @@ import type { DocComponent, DocPage, DocsSearchResult } from './types.js';
 const SUMMARY_LENGTH = 160;
 const EXCERPT_LENGTH = 180;
 const GRAPHEME_SEGMENTER = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+const NORMALIZATION_CHUNK = 512;
+// NFKC never joins these characters to what precedes them, so chunks split before them.
+const NORMALIZATION_BOUNDARY = /[ -~\u4e00-\u9fff]/g;
 
 interface ParsedSource {
   body: string;
@@ -355,76 +358,94 @@ export function parseDoc(path: string, content: string): DocPage {
 }
 
 function normalize(value: string): string {
-  // JavaScript lowercasing preserves Greek final sigma (ς), while a
-  // case-insensitive search for Σ produces σ. Fold the positional variants to
-  // one form after NFKC/lowercase so substring matching is position agnostic.
+  // Lowercasing keeps final sigma (ς) where a search for Σ yields σ.
   return value
     .normalize('NFKC')
     .toLowerCase()
     .replace(/\u03c2/g, '\u03c3');
 }
 
-interface NormalizedIndex {
-  boundaries: number[];
-  codePoints: number[];
+interface NormalizedText {
+  offsets: number[];
+  sources: number[];
   value: string;
 }
 
-function indexNormalizedText(value: string): NormalizedIndex {
-  const boundaries: number[] = [];
-  const codePoints: number[] = [];
-  for (const part of GRAPHEME_SEGMENTER.segment(value)) {
-    boundaries.push(part.index);
-    codePoints.push(Array.from(part.segment).length);
-  }
-  boundaries.push(value.length);
-  return { boundaries, codePoints, value: normalize(value) };
+interface Grapheme {
+  codePoints: number;
+  end: number;
+  start: number;
 }
 
-function sourceBoundaryForNormalizedOffset(
-  text: string,
-  indexed: NormalizedIndex,
-  normalizedOffset: number,
-): number {
-  // NFKC may compose across grapheme boundaries (for example compatibility
-  // Jamo ㄱ + ㅏ -> 가), so independently normalizing each grapheme cannot
-  // produce a correct offset map. Normalized prefix lengths are monotonic:
-  // composition may create a plateau but cannot remove prior output. Binary
-  // search those true whole-prefix lengths instead.
+function normalizeChunks(text: string): NormalizedText {
+  const offsets: number[] = [];
+  const sources: number[] = [];
+  const parts: string[] = [];
+  let length = 0;
+  for (let start = 0; start < text.length;) {
+    NORMALIZATION_BOUNDARY.lastIndex = start + NORMALIZATION_CHUNK;
+    const end = NORMALIZATION_BOUNDARY.exec(text)?.index ?? text.length;
+    const part = normalize(text.slice(start, end));
+    offsets.push(length);
+    sources.push(start);
+    parts.push(part);
+    length += part.length;
+    start = end;
+  }
+  return { offsets, sources, value: parts.join('') };
+}
+
+function lastIndexAtMost(count: number, target: number, valueAt: (index: number) => number) {
   let low = 0;
-  let high = indexed.boundaries.length - 1;
-  const lengths = new Map<number, number>([
-    [0, 0],
-    [high, indexed.value.length],
-  ]);
-  const prefixLength = (boundary: number): number => {
-    const cached = lengths.get(boundary);
-    if (cached !== undefined) return cached;
-    const length = normalize(text.slice(0, indexed.boundaries[boundary])).length;
-    lengths.set(boundary, length);
-    return length;
-  };
+  let high = count - 1;
   while (low < high) {
     const middle = Math.ceil((low + high) / 2);
-    if (prefixLength(middle) <= normalizedOffset) low = middle;
+    if (valueAt(middle) <= target) low = middle;
     else high = middle - 1;
   }
   return low;
 }
 
-function sourceBoundaryForNormalizedEnd(
+function graphemeAt(graphemes: Intl.Segments, position: number): Grapheme {
+  const part = graphemes.containing(position);
+  if (!part) return { codePoints: 0, end: position, start: position };
+  return {
+    codePoints: Array.from(part.segment).length,
+    end: part.index + part.segment.length,
+    start: part.index,
+  };
+}
+
+function normalizedLength(text: string, normalized: NormalizedText, position: number): number {
+  const { offsets, sources } = normalized;
+  const chunk = lastIndexAtMost(sources.length, position, (index) => sources[index] ?? 0);
+  const start = sources[chunk] ?? 0;
+  return (offsets[chunk] ?? 0) + normalize(text.slice(start, position)).length;
+}
+
+function sourceBoundary(
   text: string,
-  indexed: NormalizedIndex,
-  normalizedOffset: number,
-): number {
-  const floor = sourceBoundaryForNormalizedOffset(text, indexed, normalizedOffset);
-  const floorLength = normalize(text.slice(0, indexed.boundaries[floor])).length;
-  // An offset inside an expanded source grapheme (İ -> i + dot, ﬁ -> fi)
-  // needs the following boundary. Exact offsets use the end of their plateau,
-  // which also captures composition across boundaries (ㄱ + ㅏ -> 가).
-  return floorLength < normalizedOffset
-    ? Math.min(floor + 1, indexed.boundaries.length - 1)
-    : floor;
+  normalized: NormalizedText,
+  graphemes: Intl.Segments,
+  offset: number,
+): { length: number; position: number } {
+  const { offsets, sources } = normalized;
+  const chunk = lastIndexAtMost(offsets.length, offset, (index) => offsets[index] ?? 0);
+  const chunkEnd = sources[chunk + 1] ?? text.length;
+  const boundaries = [graphemeAt(graphemes, sources[chunk] ?? 0).start];
+  for (let position = boundaries[0] ?? 0; position < chunkEnd;) {
+    position = graphemeAt(graphemes, position).end;
+    boundaries.push(position);
+  }
+  const lengths = new Map<number, number>();
+  const lengthAt = (index: number): number => {
+    const position = boundaries[index] ?? 0;
+    const length = lengths.get(position) ?? normalizedLength(text, normalized, position);
+    lengths.set(position, length);
+    return length;
+  };
+  const index = lastIndexAtMost(boundaries.length, offset, lengthAt);
+  return { length: lengthAt(index), position: boundaries[index] ?? 0 };
 }
 
 function countMatches(value: string, term: string): number {
@@ -441,15 +462,14 @@ function countMatches(value: string, term: string): number {
 
 function excerpt(text: string, query: string, terms: string[]): string {
   if (!text) return '';
-  const indexed = indexNormalizedText(text);
-  const normalized = indexed.value;
-  const exactIndex = normalized.indexOf(query);
+  const normalized = normalizeChunks(text);
+  const exactIndex = normalized.value.indexOf(query);
   let matchIndex = exactIndex;
   let matchLength = query.length;
   if (matchIndex < 0) {
     matchIndex = Number.POSITIVE_INFINITY;
     for (const term of terms) {
-      const index = normalized.indexOf(term);
+      const index = normalized.value.indexOf(term);
       if (index >= 0 && index < matchIndex) {
         matchIndex = index;
         matchLength = term.length;
@@ -458,45 +478,35 @@ function excerpt(text: string, query: string, terms: string[]): string {
   }
   if (!Number.isFinite(matchIndex)) return truncate(text, EXCERPT_LENGTH);
 
-  const matchStartGrapheme = sourceBoundaryForNormalizedOffset(text, indexed, matchIndex);
-  const matchEndGrapheme = sourceBoundaryForNormalizedEnd(
-    text,
-    indexed,
-    Math.min(normalized.length, matchIndex + matchLength),
-  );
-  let matchCodePoints = 0;
-  for (let index = matchStartGrapheme; index < matchEndGrapheme; index += 1) {
-    matchCodePoints += indexed.codePoints[index] ?? 0;
-  }
+  const graphemes = GRAPHEME_SEGMENTER.segment(text);
+  const matchStart = sourceBoundary(text, normalized, graphemes, matchIndex).position;
+  const endOffset = Math.min(normalized.value.length, matchIndex + matchLength);
+  const floor = sourceBoundary(text, normalized, graphemes, endOffset);
+  const matchEnd =
+    floor.length < endOffset ? graphemeAt(graphemes, floor.position).end : floor.position;
+  const matchCodePoints = Array.from(text.slice(matchStart, matchEnd)).length;
 
-  // Anchor the window to the source match rather than subtracting from its
-  // normalized offset: NFKC can contract one source grapheme (for example a
-  // three-code-point Hangul Jamo sequence) to one indexed character. Reserve
-  // room for the complete source match when it fits; overlong matches are
-  // sensibly shown from their beginning and truncated to the normal window.
   const contextLimit = Math.min(
     Math.floor(EXCERPT_LENGTH / 3),
     Math.max(0, EXCERPT_LENGTH - matchCodePoints),
   );
-  let startGrapheme = matchStartGrapheme;
+  let start = matchStart;
   let contextCodePoints = 0;
-  while (startGrapheme > 0) {
-    const previousLength = indexed.codePoints[startGrapheme - 1] ?? 0;
-    if (contextCodePoints + previousLength > contextLimit) break;
-    contextCodePoints += previousLength;
-    startGrapheme -= 1;
+  while (start > 0) {
+    const previous = graphemeAt(graphemes, start - 1);
+    if (contextCodePoints + previous.codePoints > contextLimit) break;
+    contextCodePoints += previous.codePoints;
+    start = previous.start;
   }
-  const start = indexed.boundaries[startGrapheme] ?? 0;
-  const prefix = start > 0 ? '…' : '';
-  let endGrapheme = startGrapheme;
+  let end = start;
   let selectedCodePoints = 0;
-  while (endGrapheme < indexed.codePoints.length) {
-    const length = indexed.codePoints[endGrapheme] ?? 0;
-    if (endGrapheme > startGrapheme && selectedCodePoints + length > EXCERPT_LENGTH) break;
-    selectedCodePoints += length;
-    endGrapheme += 1;
+  while (end < text.length) {
+    const next = graphemeAt(graphemes, end);
+    if (end > start && selectedCodePoints + next.codePoints > EXCERPT_LENGTH) break;
+    selectedCodePoints += next.codePoints;
+    end = next.end;
   }
-  const end = indexed.boundaries[endGrapheme] ?? text.length;
+  const prefix = start > 0 ? '…' : '';
   const suffix = end < text.length ? '…' : '';
   return `${prefix}${text.slice(start, end).trim()}${suffix}`;
 }

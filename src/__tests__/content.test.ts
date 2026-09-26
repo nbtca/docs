@@ -175,6 +175,12 @@ describe('parseDoc', () => {
     expect(searchDoc(page, 'needle')?.excerpt).toContain('needle');
   });
 
+  it('maps a match that follows many expanded and composed characters', () => {
+    const page = parseDoc('search/long-mixed.md', `# X\n\n${'İ ﬁ ㄱㅏ '.repeat(300)}needle tail`);
+
+    expect(searchDoc(page, 'needle')?.excerpt).toBe(`…${'ㄱㅏ İ ﬁ '.repeat(8)}ㄱㅏ needle tail`);
+  });
+
   it('truncates a query longer than the excerpt window from the match start', () => {
     const query = 'q'.repeat(240);
     const page = parseDoc('search/long-query.md', `# X\n\n${query} tail`);
