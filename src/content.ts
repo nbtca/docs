@@ -193,10 +193,14 @@ function extractTitle(body: string): string | undefined {
 }
 
 function truncate(value: string, length: number): string {
-  const characters: string[] = [];
-  for (const character of value) characters.push(character);
-  if (characters.length <= length) return value;
-  return `${characters.slice(0, length).join('').trimEnd()}…`;
+  let end = 0;
+  let codePoints = 0;
+  for (const { index, segment } of GRAPHEME_SEGMENTER.segment(value)) {
+    codePoints += Array.from(segment).length;
+    if (codePoints > length) return `${value.slice(0, end).trimEnd()}…`;
+    end = index + segment.length;
+  }
+  return value;
 }
 
 function extractSummary(body: string): string {

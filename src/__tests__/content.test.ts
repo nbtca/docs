@@ -148,6 +148,12 @@ describe('parseDoc', () => {
     expect(searchDoc(page, 'match')?.excerpt).toBe(`X match ${'a'.repeat(171)}…`);
   });
 
+  it('keeps a grapheme cluster intact when truncating a summary', () => {
+    const page = parseDoc('search/summary.md', `${'a'.repeat(159)}👩‍💻 tail`);
+
+    expect(page.summary).toBe(`${'a'.repeat(159)}…`);
+  });
+
   it('maps a match after NFKC-expanded ligatures back to the source excerpt', () => {
     const page = parseDoc('search/ligature.md', `# X\n\n${'ﬁ'.repeat(100)} needle tail`);
 
