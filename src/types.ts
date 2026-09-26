@@ -58,6 +58,7 @@ export interface DocsClientOptions {
     file?: number;
   };
   store?: DocsStore;
+  mirror?: string;
 }
 
 export interface DocsClient {

@@ -37,6 +37,7 @@ const matches = await docs.search('repair', { pathPrefix: 'repair' });
 | `cacheTtlMs.dir`  | `300000`                     | Directory and tree cache TTL |
 | `cacheTtlMs.file` | `600000`                     | File cache TTL               |
 | `store`           | none                         | Persistent cache, see below  |
+| `mirror`          | none                         | Mirror base URL, see below   |
 
 ### `docs.listDir(path?)`
 
@@ -72,6 +73,13 @@ An object with `read(key): string | undefined` and `write(key, value): void`. Th
 tree under `tree` and file content under `blob-<sha>`, where `<sha>` is the Git blob id. `getFile`
 serves stored content only when its hash matches the blob id in the last known tree, so a changed
 file is always refetched. Store errors and corrupt entries are ignored; eviction is up to the store.
+
+### `mirror`
+
+A base URL tried before GitHub by `listAll` and `getFile`, such as
+`https://docs.nbtca.space/docs-api`. It serves `index.json` in the shape of GitHub's recursive tree
+response and each file at `raw/<path>`. Any mirror failure, invalid or truncated index, or wait past
+5 seconds falls back to GitHub. The GitHub token is never sent to the mirror.
 
 ### `docs.search(query, options?)`
 
