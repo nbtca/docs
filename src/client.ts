@@ -45,6 +45,7 @@ const SKIP = new Set([
 const TREE_KEY = 'tree';
 const BUNDLE_KEY = 'bundle';
 const MIRROR_TIMEOUT_MS = 5_000;
+const BUNDLE_TIMEOUT_MS = 30_000;
 const SHA = /^[0-9a-f]{40}$/;
 const SEARCH_CONCURRENCY = 6;
 const SEARCH_RESULT_LIMIT = 20;
@@ -450,20 +451,22 @@ export function createDocsClient(options: DocsClientOptions = {}): DocsClient {
     base: string,
     path: string,
     read: (response: Response) => Promise<T | undefined>,
+    timeoutMs = MIRROR_TIMEOUT_MS,
+    tripsBreaker = true,
   ): Promise<T | undefined> {
     if (mirrorFailed) return undefined;
     try {
       return await withResponse(
         `${base}/${path}`,
-        MIRROR_TIMEOUT_MS,
+        timeoutMs,
         async (response) => {
-          if (response.status >= 500) mirrorFailed = true;
+          if (response.status >= 500 && tripsBreaker) mirrorFailed = true;
           return response.ok ? await read(response) : undefined;
         },
         {},
       );
     } catch {
-      mirrorFailed = true;
+      if (tripsBreaker) mirrorFailed = true;
       return undefined;
     }
   }
@@ -646,8 +649,13 @@ export function createDocsClient(options: DocsClientOptions = {}): DocsClient {
 
   async function loadBundle(base: string, generation: number): Promise<number> {
     const shas = new Map((await listAll()).map((item) => [item.path, item.sha]));
-    const files = await fromMirror(base, 'bundle.json', async (response) =>
-      parseBundle(await response.json()),
+    // The bundle is optional: losing it must not stop per-file mirror reads.
+    const files = await fromMirror(
+      base,
+      'bundle.json',
+      async (response) => parseBundle(await response.json()),
+      BUNDLE_TIMEOUT_MS,
+      false,
     );
     let loaded = 0;
     for (const file of files ?? []) {
@@ -726,6 +734,7 @@ export function createDocsClient(options: DocsClientOptions = {}): DocsClient {
     fileRequests.clear();
     treeRequests.clear();
     bundleRequests.clear();
+    mirrorFailed = false;
   }
 
   return {

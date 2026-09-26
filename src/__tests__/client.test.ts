@@ -1261,6 +1261,38 @@ describe('mirror', () => {
       await expect(createDocsClient({ mirror }).prefetch()).resolves.toBe(0);
     });
 
+    it('keeps reading single files from the mirror when the bundle fails', async () => {
+      const fetchMock = routes({
+        mirror: (url) =>
+          url.endsWith('/index.json')
+            ? { ok: true, json: async () => mirrorTree }
+            : url.endsWith('/bundle.json')
+              ? { ok: false, status: 503 }
+              : { ok: true, text: async () => '# From mirror' },
+      });
+      const client = createDocsClient({ mirror });
+
+      await expect(client.prefetch()).resolves.toBe(0);
+      await expect(client.getFile('repair/guide.md')).resolves.toBe('# From mirror');
+      expect(String(fetchMock.mock.calls.at(-1)?.[0])).toContain('docs.example.org');
+    });
+
+    it('asks the mirror again after clear()', async () => {
+      let mirrorUp = false;
+      const fetchMock = routes({
+        mirror: () =>
+          mirrorUp ? { ok: true, json: async () => mirrorTree } : { ok: false, status: 503 },
+        github: () => ({ ok: true, json: async () => mockTree }),
+      });
+      const client = createDocsClient({ mirror });
+
+      await client.listAll();
+      mirrorUp = true;
+      client.clear();
+      await client.listAll();
+      expect(String(fetchMock.mock.calls.at(-1)?.[0])).toContain('docs.example.org');
+    });
+
     it('does nothing without a mirror', async () => {
       const fetchMock = vi.fn();
       vi.stubGlobal('fetch', fetchMock);
