@@ -1,8 +1,8 @@
 # @nbtca/docs
 
-Typed GitHub client for the [NBTCA documents repository](https://github.com/nbtca/documents).
-It lists Markdown documents, reads raw content, caches successful responses, and falls back to
-stale data after transient failures. Rendering remains the consumer's responsibility.
+Typed client for the [NBTCA documents repository](https://github.com/nbtca/documents).
+It lists, reads, and searches the Markdown documents, keeps a hash-verified local cache, and
+reads from a mirror when GitHub is slow or unreachable. Rendering is up to the consumer.
 
 ## Install
 
@@ -15,92 +15,57 @@ npm install @nbtca/docs
 ```ts
 import { createDocsClient } from '@nbtca/docs';
 
-const docs = createDocsClient();
+const docs = createDocsClient({ mirror: 'https://docs.nbtca.space/docs-api', store });
 
-const sections = await docs.listDir();
-const documents = await docs.listAll();
-const markdown = await docs.getFile('repair/guide.md');
+const sections = await docs.listSections();
 const page = await docs.getDocument('repair/index.md');
-const matches = await docs.search('repair', { pathPrefix: 'repair' });
+const matches = await docs.search('repair', { pathPrefix: 'repair', limit: 10 });
 ```
+
+After a transient failure the client serves stale cached data. With none, it throws
+`DocsFetchError`, which exposes `path` and HTTP `status`.
 
 ## API
 
-### `createDocsClient(options?)`
+| Method                    | Description                                                                |
+| ------------------------- | -------------------------------------------------------------------------- |
+| `listSections()`          | Top-level sections with document counts and index paths when present       |
+| `listDir(path?)`          | Directories and Markdown files at a path, the root by default              |
+| `listAll()`               | Every Markdown file with its Git blob `sha`                                |
+| `peekAll()`               | The last known file list without a request, or `undefined`                 |
+| `getFile(path)`           | Raw file content                                                           |
+| `getDocument(path)`       | Route, section, title, summary, and semantic component attributes          |
+| `search(query, options?)` | Ranked results with excerpts; options are `pathPrefix` and `limit`         |
+| `prefetch()`              | Loads the whole mirror bundle in one request; resolves to the count loaded |
+| `clear()`                 | Drops all cached values and in-flight requests                             |
+
+`parseDoc(path, markdown)` extracts the same metadata as `getDocument` from content you already
+have. Component metadata covers `PageHero`, `FactStrip`, `LinkCard`, `Split`, `TimelineEntry`, and
+`Figure`.
+
+## Options
 
 | Option            | Default                      | Description                  |
 | ----------------- | ---------------------------- | ---------------------------- |
+| `mirror`          | none                         | Mirror base URL, see below   |
+| `store`           | none                         | Persistent cache, see below  |
+| `token`           | `GITHUB_TOKEN` or `GH_TOKEN` | GitHub token                 |
 | `owner`           | `'nbtca'`                    | GitHub owner                 |
 | `repo`            | `'documents'`                | Repository name              |
 | `branch`          | `'main'`                     | Branch name or ref           |
-| `token`           | `GITHUB_TOKEN` or `GH_TOKEN` | GitHub token                 |
 | `cacheTtlMs.dir`  | `300000`                     | Directory and tree cache TTL |
 | `cacheTtlMs.file` | `600000`                     | File cache TTL               |
-| `store`           | none                         | Persistent cache, see below  |
-| `mirror`          | none                         | Mirror base URL, see below   |
 
-### `docs.listDir(path?)`
+`store` is any object with `read(key): string | undefined` and `write(key, value): void`. The
+client writes the file list under `tree` and content under `blob-<sha>`. Stored content is served
+only when its hash matches the blob id in the last known tree, so a changed file is always
+refetched. Store errors and corrupt entries are ignored; eviction is up to the store.
 
-Lists directories and Markdown files at a repository-relative path. The root path is used when
-`path` is omitted.
-
-### `docs.getFile(path)`
-
-Returns raw file content.
-
-### `docs.listAll()`
-
-Lists every Markdown file through GitHub's recursive tree API. Each item carries its Git blob `sha`.
-
-### `docs.peekAll()`
-
-Returns the last known tree without a request: the one fetched in this process, else the one in
-`store`, else `undefined`.
-
-### `docs.listSections()`
-
-Returns top-level content sections with document counts and optional index paths.
-
-### `docs.getDocument(path)`
-
-Returns content with its route, section, title, summary, and semantic component attributes. Component
-metadata covers `PageHero`, `FactStrip`, `LinkCard`, `Split`, `TimelineEntry`, and `Figure` without
-imposing a renderer.
-
-### `store`
-
-An object with `read(key): string | undefined` and `write(key, value): void`. The client keeps the
-tree under `tree` and file content under `blob-<sha>`, where `<sha>` is the Git blob id. `getFile`
-serves stored content only when its hash matches the blob id in the last known tree, so a changed
-file is always refetched. Store errors and corrupt entries are ignored; eviction is up to the store.
-
-### `mirror`
-
-A base URL tried before GitHub by `listAll` and `getFile`, such as
-`https://docs.nbtca.space/docs-api`. It serves `index.json` in the shape of GitHub's recursive tree
+`mirror` is tried before GitHub. It serves `index.json` in the shape of GitHub's recursive tree
 response, each file at `raw/<path>`, and optionally `bundle.json` as
-`{ files: [{ path, sha, content }] }`. Any mirror failure, invalid or truncated index, or wait past
-5 seconds falls back to GitHub. The GitHub token is never sent to the mirror.
-
-### `docs.prefetch()`
-
-Loads every document from the mirror's `bundle.json` in one request and resolves to how many were
-loaded. Only files whose content hashes to the blob id in the current tree are kept. Resolves to `0`
-without a mirror or when the bundle is unavailable.
-
-### `docs.search(query, options?)`
-
-Searches paths, titles, summaries, Markdown text, and semantic component attributes. Results are
-ranked and include excerpts. With a mirror, a search that would fetch many uncached documents calls
-`prefetch()` first. Use `pathPrefix` to scope a search and `limit` to cap results.
-
-### `docs.clear()`
-
-Clears all cached values and in-flight request bookkeeping.
-
-### `DocsFetchError`
-
-Thrown when a request fails without usable stale data. Exposes `path` and HTTP `status`.
+`{ files: [{ path, sha, content }] }`. A search that would fetch many uncached documents loads the
+bundle first. Any mirror failure, invalid index, or wait past 5 seconds falls back to GitHub. The
+GitHub token is never sent to the mirror.
 
 ## License
 
