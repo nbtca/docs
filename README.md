@@ -24,6 +24,8 @@ const matches = await docs.search('repair', { pathPrefix: 'repair', limit: 10 })
 
 After a transient failure the client serves stale cached data. With none, it throws
 `DocsFetchError`, which exposes `path` and HTTP `status`.
+With a persistent `store`, listing and searching cached documents also work after
+restarting offline. The first load still needs a network connection.
 
 ## API
 
@@ -64,8 +66,8 @@ refetched. Store errors and corrupt entries are ignored; eviction is up to the s
 `mirror` is tried before GitHub. It serves `index.json` in the shape of GitHub's recursive tree
 response, each file at `raw/<path>`, and optionally `bundle.json` as
 `{ files: [{ path, sha, content }] }`. A search that would fetch many uncached documents loads the
-bundle first. Any mirror failure, invalid index, or wait past 5 seconds falls back to GitHub. The
-GitHub token is never sent to the mirror.
+bundle first. Mirror index and file requests wait up to 15 seconds before falling back to GitHub;
+the optional bundle gets 30 seconds. The GitHub token is never sent to the mirror.
 
 ## License
 

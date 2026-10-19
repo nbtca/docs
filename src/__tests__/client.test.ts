@@ -830,6 +830,44 @@ describe('persistent store', () => {
     expect(spy).not.toHaveBeenCalled();
   });
 
+  it('lists and searches persisted documents after restarting offline', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValueOnce({ ok: true, json: async () => tree(guideSha) })
+        .mockResolvedValueOnce({ ok: true, text: async () => '# Guide' }),
+    );
+    const store = memoryStore();
+    const online = createDocsClient({ store });
+    const items = await online.listAll();
+    await online.getDocument('repair/guide.md');
+
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('fetch failed')));
+    const offline = createDocsClient({ store });
+    const cached = await offline.listAll();
+    expect(cached).toEqual(items);
+    cached.length = 0;
+    await expect(offline.listAll()).resolves.toEqual(items);
+    await expect(offline.listSections()).resolves.toEqual([{ path: 'repair', count: 1 }]);
+    await expect(offline.search('Guide')).resolves.toMatchObject([
+      { path: 'repair/guide.md', title: 'Guide' },
+    ]);
+  });
+
+  it.each([408, 429, 503])('uses the persisted tree after a transient HTTP %s', async (status) => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(null, { status })));
+    const items = [{ name: 'guide.md', path: 'repair/guide.md', type: 'file', sha: guideSha }];
+    const store = memoryStore({ tree: JSON.stringify(items) });
+    await expect(createDocsClient({ store }).listAll()).resolves.toEqual(items);
+  });
+
+  it.each([401, 403, 404])('does not hide HTTP %s behind a persisted tree', async (status) => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(null, { status })));
+    const store = memoryStore({ tree: '[]' });
+    await expect(createDocsClient({ store }).listAll()).rejects.toMatchObject({ status });
+  });
+
   it('refetches a changed file and stores it under its own sha', async () => {
     vi.stubGlobal(
       'fetch',
@@ -1187,7 +1225,7 @@ describe('mirror', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it('gives up on a slow mirror after five seconds', async () => {
+  it('falls back to GitHub when the mirror exceeds fifteen seconds', async () => {
     vi.useFakeTimers();
     try {
       const fetchMock = vi.fn().mockImplementation((url: string, init: RequestInit) => {
@@ -1201,7 +1239,7 @@ describe('mirror', () => {
       });
       vi.stubGlobal('fetch', fetchMock);
       const request = createDocsClient({ mirror }).listAll();
-      await vi.advanceTimersByTimeAsync(5_000);
+      await vi.advanceTimersByTimeAsync(15_000);
       await expect(request).resolves.toHaveLength(3);
     } finally {
       vi.useRealTimers();
@@ -1220,6 +1258,35 @@ describe('mirror', () => {
           url.endsWith('/index.json') ? { ok: true, json: async () => mirrorTree } : bundle,
       });
     }
+
+    it('loads a bundle through a slow mirror without contacting GitHub', async () => {
+      vi.useFakeTimers();
+      try {
+        const fetchMock = routes({
+          mirror: (url) =>
+            new Promise((resolve) => {
+              setTimeout(() => {
+                resolve(
+                  url.endsWith('/index.json')
+                    ? { ok: true, json: async () => mirrorTree }
+                    : bundleOf([{ path: 'repair/guide.md', sha: guideSha, content: '# Guide' }]),
+                );
+              }, 8_000);
+            }),
+        });
+        const client = createDocsClient({ mirror });
+        const request = client.prefetch();
+        await vi.advanceTimersByTimeAsync(16_000);
+        await expect(request).resolves.toBe(1);
+        await expect(client.getFile('repair/guide.md')).resolves.toBe('# Guide');
+        expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual([
+          'https://docs.example.org/docs-api/index.json',
+          'https://docs.example.org/docs-api/bundle.json',
+        ]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
 
     it('loads every verified file from the bundle in one request', async () => {
       const fetchMock = mirrorWith(
