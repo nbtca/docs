@@ -44,7 +44,7 @@ const SKIP = new Set([
 
 const TREE_KEY = 'tree';
 const BUNDLE_KEY = 'bundle';
-const MIRROR_TIMEOUT_MS = 5_000;
+const MIRROR_TIMEOUT_MS = 15_000;
 const BUNDLE_TIMEOUT_MS = 30_000;
 const SHA = /^[0-9a-f]{40}$/;
 const SEARCH_CONCURRENCY = 6;
@@ -491,13 +491,11 @@ export function createDocsClient(options: DocsClientOptions = {}): DocsClient {
   }
 
   function recoverFailure<T>(
-    cache: TtlCache<T>,
-    key: string,
+    stale: T | undefined,
     path: string,
     error: unknown,
     copy: (value: T) => T = (value) => value,
   ): T {
-    const stale = cache.getStale(key);
     if (stale !== undefined) return copy(stale);
     const message =
       error instanceof Error && error.name === 'AbortError' ? 'Request timed out' : String(error);
@@ -536,7 +534,7 @@ export function createDocsClient(options: DocsClientOptions = {}): DocsClient {
       });
     } catch (error) {
       if (error instanceof DocsFetchError) throw error;
-      return recoverFailure(dirCache, path, path, error, copyItems);
+      return recoverFailure(dirCache.getStale(path), path, error, copyItems);
     }
   }
 
@@ -552,7 +550,6 @@ export function createDocsClient(options: DocsClientOptions = {}): DocsClient {
   }
 
   async function loadAll(generation: number): Promise<DocItem[]> {
-    const key = TREE_KEY;
     if (mirror !== undefined) {
       const mirrored = await fromMirror(mirror, 'index.json', async (response) => {
         const data = parseTreeResponse(await response.json());
@@ -564,13 +561,13 @@ export function createDocsClient(options: DocsClientOptions = {}): DocsClient {
     try {
       return await withResponse(url, 20_000, async (response) => {
         if (!response.ok) {
-          const stale = treeCache.getStale(key);
+          const stale = knownTree();
           if (stale !== undefined && (await isTransientResponse(response))) return copyItems(stale);
           throw new DocsFetchError('', response.status, `HTTP ${String(response.status)}`);
         }
         const data = parseTreeResponse(await response.json());
         if (data.truncated) {
-          const stale = treeCache.getStale(key);
+          const stale = knownTree();
           if (stale !== undefined) return copyItems(stale);
           throw new DocsFetchError(
             '',
@@ -582,7 +579,7 @@ export function createDocsClient(options: DocsClientOptions = {}): DocsClient {
       });
     } catch (error) {
       if (error instanceof DocsFetchError) throw error;
-      return recoverFailure(treeCache, key, '', error, copyItems);
+      return recoverFailure(knownTree(), '', error, copyItems);
     }
   }
 
@@ -632,7 +629,7 @@ export function createDocsClient(options: DocsClientOptions = {}): DocsClient {
       });
     } catch (error) {
       if (error instanceof DocsFetchError) throw error;
-      return recoverFailure(fileCache, path, path, error);
+      return recoverFailure(fileCache.getStale(path), path, error);
     }
   }
 
